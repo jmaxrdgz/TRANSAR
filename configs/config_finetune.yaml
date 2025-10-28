@@ -1,0 +1,32 @@
+# config_finetune.yaml
+
+# TODO: Make config loggable with lightning
+# TODO: make training work for every input size
+
+SEED: 42
+
+MODEL:
+  NAME: TRANSAR
+  IN_SIZE: 256
+  IN_CHANS: 1
+  SCALE_FACTOR: 32
+  HEAT_THS: 0.5
+  NMS_DIST: 23
+  HIT_DIST: 45
+
+  BACKBONE:
+    NAME: Swin_V2_T
+    WEIGHTS: null
+
+DATA:
+  DATA_PATH: dataset/supervised/synthetic_yolo
+  NUM_CLASS: null
+  GAUSS_KEN: 10.0                          # 10.0 in TRANSAR
+
+TRAIN:
+  NUM_WORKERS: 4
+  EPOCHS: 10
+  BATCH_SIZE: 16
+  LR: 0.0001
+
+

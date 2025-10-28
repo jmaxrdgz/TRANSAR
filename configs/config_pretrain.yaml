@@ -1,0 +1,7 @@
+# config_pretrain.yaml
+
+# TODO: Make config loggable with lightning
+# TODO: make training work for every input size
+
+SEED: 42
+
