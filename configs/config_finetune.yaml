@@ -20,13 +20,19 @@ MODEL:
 
 DATA:
   DATA_PATH: dataset/supervised/synthetic_yolo
-  NUM_CLASS: null
+  NUM_CLASS: 2                             # 2 (Foreground & Background) in TRANSAR
   GAUSS_KEN: 10.0                          # 10.0 in TRANSAR
+  GLOBAL_STD: 1.5                          # Use scripts/compute_global_std.py to compute from training data
 
 TRAIN:
   NUM_WORKERS: 4
   EPOCHS: 10
   BATCH_SIZE: 16
   LR: 0.0001
+
+  ADAPTIVE_SAMPLING:
+    ENABLED: true
+    SCHEDULER_TYPE: cosine                     # linear, cosine, exponential (cosine in TRANSAR)
+    ALPHA: 0.8                                 # Weight for g(t) vs h(t) (0.8 in TRANSAR)
 
 

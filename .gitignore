@@ -1,0 +1,60 @@
+tests/
+# -----------------------------
+# Python
+# -----------------------------
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+
+# -----------------------------
+# Virtual environments
+# -----------------------------
+.venv/
+venv/
+env/
+conda_env/
+*.env
+*.venv
+
+# -----------------------------
+# Jupyter / IPython
+# -----------------------------
+.ipynb_checkpoints/
+*.ipynb_checkpoints
+
+# -----------------------------
+# Lightning / Checkpoints / Logs
+# -----------------------------
+lightning_logs/
+checkpoints/
+*.ckpt
+*.pth
+*.pt
+
+# -----------------------------
+# Datasets / Outputs
+# -----------------------------
+outputs/
+results/
+runs/
+wandb/
+tensorboard/
+dataset/
+
+# -----------------------------
+# OS / Editor files
+# -----------------------------
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# -----------------------------
+# Build / Dist
+# -----------------------------
+build/
+dist/
+*.egg-info/
+*.egg
