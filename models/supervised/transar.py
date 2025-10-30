@@ -3,7 +3,7 @@ import torch.nn.functional as F
 import lightning as L
 
 from models.helpers import PeakDetect, DistanceNMS
-# from utils.metrics import compute_accuracy
+from utils.metrics import compute_f1_components
 from models.supervised.loss import TRANSARLoss
 
 
@@ -31,7 +31,7 @@ class TRANSAR(L.LightningModule):
         self.train_f1_score = 0.0  # F1 computed on training data (for adaptive sampling)
         self.val_f1_score = 0.0    # F1 computed on validation data (for monitoring)
 
-        # Metrics for F1 computation
+        # Metrics for F1 computation (keep on GPU to avoid sync overhead)
         self.train_tp = 0
         self.train_fp = 0
         self.train_fn = 0
@@ -100,7 +100,7 @@ class TRANSAR(L.LightningModule):
         labels = batch['labels']  # List of [N_i] tensors
 
         # Forward pass
-        heatmap_pred = self.forward(x)  # [B, num_classes, H', W']
+        heatmap_pred = self.forward(x)  # [B, num_classes, H, W]
 
         # Convert YOLO boxes to target heatmap based on mode
         if self.is_binary:
@@ -120,8 +120,6 @@ class TRANSAR(L.LightningModule):
                 sigma=self.config.DATA.GAUSS_KEN,
                 num_classes=self.num_classes
             )
-
-        # Ensure target is on same device as predictions (Lightning moves model to GPU)
         target_heatmap = target_heatmap.to(heatmap_pred.device)
 
         assert heatmap_pred.shape == target_heatmap.shape, \
@@ -130,11 +128,20 @@ class TRANSAR(L.LightningModule):
         # Compute loss
         loss = self.loss(heatmap_pred, target_heatmap)
 
+        pred = self.detect(heatmap_pred)
+
         # Accumulate F1 components on training data (for adaptive sampling)
-        tp, fp, fn = self._compute_f1_components(heatmap_pred, target_heatmap)
-        self.train_tp += tp
-        self.train_fp += fp
-        self.train_fn += fn
+        with torch.no_grad():
+            tp, fp, fn = compute_f1_components(
+                pred, 
+                boxes, 
+                labels, 
+                heatmap_size=heatmap_pred.shape[-2:], 
+                is_binary=self.is_binary
+            )
+            self.train_tp += tp
+            self.train_fp += fp
+            self.train_fn += fn
 
         return loss
     
@@ -176,13 +183,19 @@ class TRANSAR(L.LightningModule):
 
         # Compute metrics
         pred = self.detect(heatmap_pred)
-        # accuracy = compute_accuracy(pred, target_heatmap, hit_dist=self.config.MODEL.HIT_DIST)
 
-        # Accumulate F1 components
-        tp, fp, fn = self._compute_f1_components(heatmap_pred, target_heatmap)
-        self.val_tp += tp
-        self.val_fp += fp
-        self.val_fn += fn
+        # Accumulate F1 components (keep on GPU to avoid sync overhead)
+        with torch.no_grad():
+            tp, fp, fn = compute_f1_components(
+                pred, 
+                boxes, 
+                labels, 
+                heatmap_size=heatmap_pred.shape[-2:], 
+                is_binary=self.is_binary
+            )
+            self.train_tp += tp
+            self.train_fp += fp
+            self.train_fn += fn
 
         self.log('val_loss', loss, prog_bar=True, sync_dist=True)
 
@@ -195,14 +208,20 @@ class TRANSAR(L.LightningModule):
         Computes F1 score on training data for use in adaptive sampling.
         This prevents data leakage by using only training data performance.
         """
+        # Sync accumulated metrics from GPU to CPU only once per epoch
+        # Convert to Python floats to avoid keeping tensors around
+        train_tp = float(self.train_tp.item()) if isinstance(self.train_tp, torch.Tensor) else float(self.train_tp)
+        train_fp = float(self.train_fp.item()) if isinstance(self.train_fp, torch.Tensor) else float(self.train_fp)
+        train_fn = float(self.train_fn.item()) if isinstance(self.train_fn, torch.Tensor) else float(self.train_fn)
+
         # Compute F1 score from accumulated training metrics
-        if self.train_tp + self.train_fp > 0:
-            precision = self.train_tp / (self.train_tp + self.train_fp)
+        if train_tp + train_fp > 0:
+            precision = train_tp / (train_tp + train_fp)
         else:
             precision = 0.0
 
-        if self.train_tp + self.train_fn > 0:
-            recall = self.train_tp / (self.train_tp + self.train_fn)
+        if train_tp + train_fn > 0:
+            recall = train_tp / (train_tp + train_fn)
         else:
             recall = 0.0
 
@@ -222,14 +241,19 @@ class TRANSAR(L.LightningModule):
 
         Computes F1 score on validation data for monitoring only.
         """
+        # Sync accumulated metrics from GPU to CPU only once per epoch
+        val_tp = float(self.val_tp.item()) if isinstance(self.val_tp, torch.Tensor) else float(self.val_tp)
+        val_fp = float(self.val_fp.item()) if isinstance(self.val_fp, torch.Tensor) else float(self.val_fp)
+        val_fn = float(self.val_fn.item()) if isinstance(self.val_fn, torch.Tensor) else float(self.val_fn)
+
         # Compute F1 score from accumulated validation metrics
-        if self.val_tp + self.val_fp > 0:
-            precision = self.val_tp / (self.val_tp + self.val_fp)
+        if val_tp + val_fp > 0:
+            precision = val_tp / (val_tp + val_fp)
         else:
             precision = 0.0
 
-        if self.val_tp + self.val_fn > 0:
-            recall = self.val_tp / (self.val_tp + self.val_fn)
+        if val_tp + val_fn > 0:
+            recall = val_tp / (val_tp + val_fn)
         else:
             recall = 0.0
 
@@ -242,32 +266,6 @@ class TRANSAR(L.LightningModule):
         self.log('val_f1', self.val_f1_score, prog_bar=True, sync_dist=True)
         self.log('val_precision', precision, prog_bar=False, sync_dist=True)
         self.log('val_recall', recall, prog_bar=False, sync_dist=True)
-
-    def _compute_f1_components(self, pred_logits, target, threshold=0.5):
-        """
-        Compute true positives, false positives, and false negatives.
-
-        Args:
-            pred_logits: Predicted heatmap LOGITS [B, C, H, W] (before sigmoid)
-            target: Target heatmap [B, C, H, W]
-            threshold: Threshold for binarizing predictions (after sigmoid)
-
-        Returns:
-            Tuple of (tp, fp, fn) as integers
-        """
-        # Convert logits to probabilities
-        pred = torch.sigmoid(pred_logits)
-
-        # Binarize predictions and targets
-        pred_binary = (pred > threshold).float()
-        target_binary = (target > 0).float()
-
-        # Compute metrics
-        tp = ((pred_binary == 1) & (target_binary == 1)).sum().item()
-        fp = ((pred_binary == 1) & (target_binary == 0)).sum().item()
-        fn = ((pred_binary == 0) & (target_binary == 1)).sum().item()
-
-        return tp, fp, fn
     
     def configure_optimizers(self):
         optimizer = torch.optim.AdamW(
