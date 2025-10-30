@@ -98,6 +98,9 @@ class TRANSARLoss:
         B = target.shape[0]
         sample_weights = torch.ones(B, device=target.device)
 
+        # Ensure class_weights is on the same device as target
+        class_weights = class_weights.to(target.device)
+
         for b in range(B):
             # Count foreground and background pixels
             fg_pixels = (target[b] > 0).sum().float()
@@ -128,6 +131,9 @@ class TRANSARLoss:
         """
         device = target.device
         B, C, H, W = target.shape
+
+        # Ensure class_weights is on the same device as target
+        class_weights = class_weights.to(device)
 
         # Initialize weights
         pixel_weights = torch.ones_like(target, device=device)
@@ -163,8 +169,9 @@ def make_one_hot(input, num_classes):
     shape = np.array(input.shape)
     shape[1] = num_classes
     shape = tuple(shape)
-    result = torch.zeros(shape)
-    result = result.scatter_(1, input.cpu(), 1)
+    # Create result tensor on the same device as input
+    result = torch.zeros(shape, device=input.device)
+    result = result.scatter_(1, input, 1)
 
     return result
 

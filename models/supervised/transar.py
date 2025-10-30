@@ -3,7 +3,7 @@ import torch.nn.functional as F
 import lightning as L
 
 from models.helpers import PeakDetect, DistanceNMS
-from utils.metrics import compute_accuracy
+# from utils.metrics import compute_accuracy
 from models.supervised.loss import TRANSARLoss
 
 
@@ -97,23 +97,26 @@ class TRANSAR(L.LightningModule):
         # Convert YOLO boxes to target heatmap
         # For single-class detection:
         target_heatmap = self._yolo_to_heatmap(
-            boxes, 
+            boxes,
             size=heatmap_pred.shape[-2:],  # Match output size
             sigma=2.0
         )
-        
+
         # Or for multi-class detection:
         # target_heatmap = self._yolo_to_heatmap_multiclass(
-        #     boxes, 
+        #     boxes,
         #     labels,
         #     size=heatmap_pred.shape[-2:],
         #     sigma=2.0,
         #     num_classes=self.num_classes
         # )
-        
+
+        # Ensure target is on same device as predictions (Lightning moves model to GPU)
+        target_heatmap = target_heatmap.to(heatmap_pred.device)
+
         assert heatmap_pred.shape == target_heatmap.shape, \
             f"Heatmap shape mismatch: {heatmap_pred.shape} vs {target_heatmap.shape}"
-        
+
         # Compute loss
         loss = self.loss(heatmap_pred, target_heatmap)
         
@@ -145,6 +148,9 @@ class TRANSAR(L.LightningModule):
         #     num_classes=self.num_classes
         # )
 
+        # Ensure target is on same device as predictions (Lightning moves model to GPU)
+        target_heatmap = target_heatmap.to(heatmap_pred.device)
+
         assert heatmap_pred.shape == target_heatmap.shape, \
             f"Heatmap shape mismatch: {heatmap_pred.shape} vs {target_heatmap.shape}"
 
@@ -153,7 +159,7 @@ class TRANSAR(L.LightningModule):
 
         # Compute metrics
         pred = self.detect(heatmap_pred)
-        accuracy = compute_accuracy(pred, target_heatmap, hit_dist=self.config.MODEL.HIT_DIST)
+        # accuracy = compute_accuracy(pred, target_heatmap, hit_dist=self.config.MODEL.HIT_DIST)
 
         # Accumulate F1 components
         tp, fp, fn = self._compute_f1_components(heatmap_pred, target_heatmap)
@@ -162,7 +168,7 @@ class TRANSAR(L.LightningModule):
         self.val_fn += fn
 
         self.log('val_loss', loss, prog_bar=True)
-        self.log('val_accuracy', accuracy, prog_bar=True)
+        # self.log('val_accuracy', accuracy, prog_bar=True)
 
         return loss
 
@@ -191,7 +197,7 @@ class TRANSAR(L.LightningModule):
         # Log F1 components
         self.log('val_f1', self.val_f1_score, prog_bar=True)
         self.log('val_precision', precision, prog_bar=False)
-        self.log('val_recall', recall, prog_bar=False)
+        self.log('val_recall', recall, prog_bar=False, sync_dist=True)
 
     def _compute_f1_components(self, pred_logits, target, threshold=0.5):
         """
@@ -296,7 +302,16 @@ class TRANSAR(L.LightningModule):
             heatmap_h, heatmap_w = size
         
         # Initialize heatmap tensor
-        device = bboxes[0].device if len(bboxes[0]) > 0 else torch.device('cpu')
+        # Try to infer device from bboxes, fallback to model's device
+        device = None
+        for bbox_list in bboxes:
+            if len(bbox_list) > 0:
+                device = bbox_list.device
+                break
+        # If all batches are empty, we'll create on CPU and let caller handle device transfer
+        if device is None:
+            device = torch.device('cpu')
+
         heatmap = torch.zeros(
             (batch_size, num_classes, heatmap_h, heatmap_w),
             dtype=torch.float32,
@@ -388,7 +403,16 @@ class TRANSAR(L.LightningModule):
             heatmap_h, heatmap_w = size
         
         # Initialize heatmap tensor
-        device = bboxes[0].device if len(bboxes[0]) > 0 else torch.device('cpu')
+        # Try to infer device from bboxes, fallback to model's device
+        device = None
+        for bbox_list in bboxes:
+            if len(bbox_list) > 0:
+                device = bbox_list.device
+                break
+        # If all batches are empty, we'll create on CPU and let caller handle device transfer
+        if device is None:
+            device = torch.device('cpu')
+
         heatmap = torch.zeros(
             (batch_size, num_classes, heatmap_h, heatmap_w),
             dtype=torch.float32,
