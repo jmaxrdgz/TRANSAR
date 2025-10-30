@@ -25,13 +25,14 @@ if __name__ == "__main__":
             pretrained=True,
             features_only=True
         )
+        print("Using ImageNet pretrained backbone weights")
     else:
         backbone = timm.create_model(
             "swinv2_tiny_window8_256",
             pretrained=False,
             features_only=True
         )
-        backbone.load_state_dict(torch.load(config.MODEL.BACKBONE.WEIGHTS, map_location="cpu")) # TODO: Create model and load custom weights
+        backbone.load_state_dict(torch.load(config.MODEL.BACKBONE.WEIGHTS, map_location="cpu"))
     in_channels = backbone.feature_info[-1]['num_chs']
 
     # Determine output channels based on num_classes
@@ -102,15 +103,8 @@ if __name__ == "__main__":
     callbacks = []
 
     if hasattr(config.TRAIN, 'ADAPTIVE_SAMPLING') and config.TRAIN.ADAPTIVE_SAMPLING.ENABLED:
-        # Add DataLoader recreation callback to update sampler each epoch
-        dataloader_callback = DataLoaderRecreationCallback(
-            train_dataset=train_dataloader.dataset,
-            batch_size=config.TRAIN.BATCH_SIZE,
-            num_workers=config.TRAIN.NUM_WORKERS,
-            persistent_workers=True,
-            pin_memory=True,
-            collate_fn=yolo_collate_fn
-        )
+        # Add DataLoader callback to update sampler weights each epoch
+        dataloader_callback = DataLoaderRecreationCallback()
         callbacks.append(dataloader_callback)
 
         # Optionally add monitoring callback for visualization

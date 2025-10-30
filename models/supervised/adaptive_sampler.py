@@ -282,6 +282,32 @@ class AdaptiveSampler:
         """
         return self.compute_loss_weights(self.d_target)
 
+    def update_sampler_weights(
+        self,
+        sampler: WeightedRandomSampler,
+        epoch: int,
+        f1_score: Optional[float] = None
+    ) -> None:
+        """
+        Update an existing WeightedRandomSampler's weights in-place.
+
+        This is more efficient than recreating the dataloader, and avoids
+        issues with Lightning's internal state management.
+
+        Args:
+            sampler: Existing WeightedRandomSampler to update
+            epoch: Current epoch number
+            f1_score: F1 score from validation
+        """
+        # Compute target distribution for this epoch
+        self.d_target = self.compute_d_target(epoch, f1_score)
+
+        # Compute sample weights
+        sample_weights = self.get_sample_weights(self.d_target)
+
+        # Update sampler's weights in-place
+        sampler.weights = sample_weights
+
     def get_distribution_info(self) -> Dict[str, any]:
         """
         Get information about current sampling distribution for logging.

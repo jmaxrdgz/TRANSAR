@@ -7,45 +7,31 @@ from torch.utils.data import DataLoader
 
 class DataLoaderRecreationCallback(L.Callback):
     """
-    Lightning callback that recreates the training dataloader at each epoch
-    with updated sampling weights from the adaptive sampler.
+    Lightning callback that updates the training sampler weights at each epoch.
 
     This ensures that the WeightedRandomSampler reflects the current epoch's
     target distribution d_target(t), allowing the curriculum learning strategy
     to progressively shift from imbalanced to balanced sampling.
 
-    Args:
-        train_dataset: Training dataset instance
-        batch_size: Batch size for training
-        num_workers: Number of workers for data loading
-        persistent_workers: Whether to keep workers alive between epochs
-        pin_memory: Whether to pin memory for faster GPU transfer
-        collate_fn: Optional collate function for batching
+    Instead of recreating the entire dataloader (which breaks Lightning's internal
+    state management), this callback updates the sampler's weights in-place.
+
+    Note: This callback is no longer needed with the new approach, but kept for
+    backward compatibility. The sampler weight update now happens in the model's
+    on_train_epoch_start hook.
     """
 
-    def __init__(
-        self,
-        train_dataset,
-        batch_size: int,
-        num_workers: int = 0,
-        persistent_workers: bool = False,
-        pin_memory: bool = True,
-        collate_fn=None
-    ):
+    def __init__(self):
         super().__init__()
-        self.train_dataset = train_dataset
-        self.batch_size = batch_size
-        self.num_workers = num_workers
-        self.persistent_workers = persistent_workers
-        self.pin_memory = pin_memory
-        self.collate_fn = collate_fn
+        print("Warning: DataLoaderRecreationCallback is deprecated. "
+              "Sampler updates now happen in model's on_train_epoch_start hook.")
 
     def on_train_epoch_start(self, trainer, pl_module):
         """
         Called at the start of each training epoch.
 
-        Recreates the training dataloader with updated sampler weights
-        based on the current epoch and previous F1 score.
+        Updates the sampler weights in-place based on the current epoch
+        and previous F1 score.
         """
         # Only proceed if adaptive sampling is enabled
         if pl_module.adaptive_sampler is None:
@@ -55,43 +41,28 @@ class DataLoaderRecreationCallback(L.Callback):
         current_epoch = trainer.current_epoch
         f1_score = pl_module.val_f1_score
 
-        # Create new weighted sampler for this epoch
-        new_sampler = pl_module.adaptive_sampler.get_weighted_sampler(
+        # Get the sampler from the dataloader
+        train_dataloader = trainer.train_dataloader
+        if hasattr(train_dataloader, 'sampler'):
+            sampler = train_dataloader.sampler
+        elif hasattr(train_dataloader, 'batch_sampler'):
+            # In case of batch sampler
+            sampler = train_dataloader.batch_sampler.sampler
+        else:
+            print("Warning: Could not find sampler in dataloader")
+            return
+
+        # Update sampler weights in-place
+        pl_module.adaptive_sampler.update_sampler_weights(
+            sampler=sampler,
             epoch=current_epoch,
             f1_score=f1_score
         )
 
-        # Create new dataloader with the updated sampler
-        new_train_dataloader = DataLoader(
-            self.train_dataset,
-            batch_size=self.batch_size,
-            sampler=new_sampler,  # Use the new sampler
-            num_workers=self.num_workers,
-            persistent_workers=self.persistent_workers,
-            pin_memory=self.pin_memory,
-            collate_fn=self.collate_fn
-        )
-
-        # Replace the trainer's train dataloader
-        # Lightning stores the combined loader in the fit loop's data fetcher
-        # We need to update both the data source and reset the data fetcher
-        try:
-            # For Lightning 2.x
-            trainer.fit_loop._data_source.instance = new_train_dataloader
-            # Reset the data fetcher to use the new dataloader
-            if hasattr(trainer.fit_loop, '_data_fetcher'):
-                trainer.fit_loop._data_fetcher = None
-        except AttributeError:
-            # Fallback for different Lightning versions
-            try:
-                trainer.fit_loop._data_source._train_dataloader_source = new_train_dataloader
-            except:
-                print("Warning: Could not replace dataloader. Lightning API may have changed.")
-
         # Log info every 10 epochs
         if current_epoch % 10 == 0:
             info = pl_module.adaptive_sampler.get_distribution_info()
-            print(f"\n[Epoch {current_epoch}] Recreated DataLoader with updated sampler")
+            print(f"\n[Epoch {current_epoch}] Updated sampler weights in-place")
             print(f"  d_target: FG={info['d_target'][1]:.4f}, BG={info['d_target'][0]:.4f}")
             print(f"  F1 score: {f1_score:.4f}\n")
 
