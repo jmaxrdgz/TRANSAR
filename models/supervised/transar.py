@@ -263,12 +263,11 @@ class TRANSAR(L.LightningModule):
             self.loss.set_adaptive_weights(loss_weights.to(self.device))
 
             # Log distribution info
-            if self.current_epoch % 10 == 0:  # Log every 10 epochs
-                info = self.adaptive_sampler.get_distribution_info()
-                self.log('d_target_fg', info['d_target'][1], prog_bar=False)
-                self.log('d_target_bg', info['d_target'][0], prog_bar=False)
-                self.log('loss_weight_fg', info['loss_weights'][1], prog_bar=False)
-                self.log('loss_weight_bg', info['loss_weights'][0], prog_bar=False)
+            info = self.adaptive_sampler.get_distribution_info()
+            self.log('d_target_fg', info['d_target'][1], prog_bar=False, sync_dist=True)
+            self.log('d_target_bg', info['d_target'][0], prog_bar=False, sync_dist=True)
+            self.log('loss_weight_fg', info['loss_weights'][1], prog_bar=False, sync_dist=True)
+            self.log('loss_weight_bg', info['loss_weights'][0], prog_bar=False, sync_dist=True)
 
     def on_validation_epoch_start(self):
         """Reset validation metrics at the start of validation."""
