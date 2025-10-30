@@ -16,7 +16,12 @@ class TRANSAR(L.LightningModule):
         self.backbone = backbone
         self.head = head
 
-        self.loss = TRANSARLoss(alpha=0.05, beta=1.0)
+        # Determine if binary or multi-class mode
+        self.num_classes = config.DATA.NUM_CLASS
+        self.is_binary = (self.num_classes == 2)
+
+        # Initialize loss with appropriate mode
+        self.loss = TRANSARLoss(alpha=0.05, beta=1.0, multiclass=(not self.is_binary))
 
         self.peak_detect = PeakDetect()
         self.dist_nms = DistanceNMS()
@@ -29,6 +34,9 @@ class TRANSAR(L.LightningModule):
         self.val_tp = 0
         self.val_fp = 0
         self.val_fn = 0
+
+        # Log mode
+        print(f"[TRANSAR] Mode: {'Binary' if self.is_binary else f'Multi-class ({self.num_classes} classes)'}")
 
 
     def forward(self, x):
@@ -89,27 +97,29 @@ class TRANSAR(L.LightningModule):
         '''
         x = batch['image']  # [B, C, H, W]
         boxes = batch['boxes']  # List of [N_i, 4] tensors
-        # labels = batch['labels']  # List of [N_i] tensors (if using multi-class)
-        
+        labels = batch['labels']  # List of [N_i] tensors
+
         # Forward pass
         heatmap_pred = self.forward(x)  # [B, num_classes, H', W']
-        
-        # Convert YOLO boxes to target heatmap
-        # For single-class detection:
-        target_heatmap = self._yolo_to_heatmap(
-            boxes,
-            size=heatmap_pred.shape[-2:],  # Match output size
-            sigma=2.0
-        )
 
-        # Or for multi-class detection:
-        # target_heatmap = self._yolo_to_heatmap_multiclass(
-        #     boxes,
-        #     labels,
-        #     size=heatmap_pred.shape[-2:],
-        #     sigma=2.0,
-        #     num_classes=self.num_classes
-        # )
+        # Convert YOLO boxes to target heatmap based on mode
+        if self.is_binary:
+            # Binary mode: single-class detection (foreground/background)
+            target_heatmap = self._yolo_to_heatmap(
+                boxes,
+                size=heatmap_pred.shape[-2:],  # Match output size
+                sigma=self.config.DATA.GAUSS_KEN,
+                num_classes=1
+            )
+        else:
+            # Multi-class mode: separate channel per class
+            target_heatmap = self._yolo_to_heatmap_multiclass(
+                boxes,
+                labels,
+                size=heatmap_pred.shape[-2:],
+                sigma=self.config.DATA.GAUSS_KEN,
+                num_classes=self.num_classes
+            )
 
         # Ensure target is on same device as predictions (Lightning moves model to GPU)
         target_heatmap = target_heatmap.to(heatmap_pred.device)
@@ -119,34 +129,36 @@ class TRANSAR(L.LightningModule):
 
         # Compute loss
         loss = self.loss(heatmap_pred, target_heatmap)
-        
+
         return loss
     
 
     def validation_step(self, batch, batch_idx):
         x = batch['image']  # [B, C, H, W]
         boxes = batch['boxes']  # List of [N_i, 4] tensors
-        # labels = batch['labels']  # List of [N_i] tensors (if using multi-class)
+        labels = batch['labels']  # List of [N_i] tensors
 
         # Forward pass
         heatmap_pred = self.forward(x)  # [B, num_classes, H', W']
 
-        # Convert YOLO boxes to target heatmap
-        # For single-class detection:
-        target_heatmap = self._yolo_to_heatmap(
-            boxes,
-            size=heatmap_pred.shape[-2:],  # Match output size
-            sigma=2.0
-        )
-
-        # Or for multi-class detection:
-        # target_heatmap = self._yolo_to_heatmap_multiclass(
-        #     boxes,
-        #     labels,
-        #     size=heatmap_pred.shape[-2:],
-        #     sigma=2.0,
-        #     num_classes=self.num_classes
-        # )
+        # Convert YOLO boxes to target heatmap based on mode
+        if self.is_binary:
+            # Binary mode: single-class detection (foreground/background)
+            target_heatmap = self._yolo_to_heatmap(
+                boxes,
+                size=heatmap_pred.shape[-2:],  # Match output size
+                sigma=self.config.DATA.GAUSS_KEN,
+                num_classes=1
+            )
+        else:
+            # Multi-class mode: separate channel per class
+            target_heatmap = self._yolo_to_heatmap_multiclass(
+                boxes,
+                labels,
+                size=heatmap_pred.shape[-2:],
+                sigma=self.config.DATA.GAUSS_KEN,
+                num_classes=self.num_classes
+            )
 
         # Ensure target is on same device as predictions (Lightning moves model to GPU)
         target_heatmap = target_heatmap.to(heatmap_pred.device)
