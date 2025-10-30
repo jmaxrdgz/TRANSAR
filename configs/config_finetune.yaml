@@ -1,6 +1,5 @@
 # config_finetune.yaml
 
-# TODO: Make config loggable with lightning
 # TODO: make training work for every input size
 
 SEED: 42
@@ -29,6 +28,7 @@ TRAIN:
   EPOCHS: 10
   BATCH_SIZE: 16
   LR: 0.0001
+  LOG_FREQ: 1
 
   ADAPTIVE_SAMPLING:
     ENABLED: true

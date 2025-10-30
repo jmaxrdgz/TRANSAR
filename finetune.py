@@ -8,7 +8,7 @@ from data.data_finetune import build_dataloaders, yolo_collate_fn
 from models.supervised.head import ESPCN
 from models.supervised.transar import TRANSAR
 from models.supervised.adaptive_sampler import AdaptiveSampler
-from models.supervised.callbacks import DataLoaderRecreationCallback, AdaptiveSamplingCallback
+from models.supervised.callbacks import AdaptiveSamplingCallback
 
 
 if __name__ == "__main__":
@@ -103,22 +103,21 @@ if __name__ == "__main__":
     callbacks = []
 
     if hasattr(config.TRAIN, 'ADAPTIVE_SAMPLING') and config.TRAIN.ADAPTIVE_SAMPLING.ENABLED:
-        # Add DataLoader callback to update sampler weights each epoch
-        dataloader_callback = DataLoaderRecreationCallback()
-        callbacks.append(dataloader_callback)
+        # Sampler weight updates now happen automatically in model's on_train_epoch_start hook
+        # DataLoaderRecreationCallback is deprecated and no longer needed
 
-        # Optionally add monitoring callback for visualization
-        # adaptive_monitoring_callback = AdaptiveSamplingCallback(
-        #     log_dir="./logs/adaptive_sampling",
-        #     plot_frequency=10
-        # )
-        # callbacks.append(adaptive_monitoring_callback)
+        # Add monitoring callback for visualization
+        adaptive_monitoring_callback = AdaptiveSamplingCallback(
+            log_dir="./logs/adaptive_sampling",
+            plot_frequency=1
+        )
+        callbacks.append(adaptive_monitoring_callback)
 
     trainer = L.Trainer(
         max_epochs=config.TRAIN.EPOCHS,
         accelerator="auto",
         devices="auto",
-        log_every_n_steps=10,
+        log_every_n_steps=config.TRAIN.LOG_FREQ,
         callbacks=callbacks,
     )
     trainer.fit(model=model, train_dataloaders=train_dataloader, val_dataloaders=val_dataloader)

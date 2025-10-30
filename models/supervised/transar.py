@@ -28,16 +28,19 @@ class TRANSAR(L.LightningModule):
 
         # Adaptive sampling
         self.adaptive_sampler = None
-        self.val_f1_score = 0.0
+        self.train_f1_score = 0.0  # F1 computed on training data (for adaptive sampling)
+        self.val_f1_score = 0.0    # F1 computed on validation data (for monitoring)
 
         # Metrics for F1 computation
+        self.train_tp = 0
+        self.train_fp = 0
+        self.train_fn = 0
         self.val_tp = 0
         self.val_fp = 0
         self.val_fn = 0
 
         # Log mode
         print(f"[TRANSAR] Mode: {'Binary' if self.is_binary else f'Multi-class ({self.num_classes} classes)'}")
-
 
     def forward(self, x):
         features = self.backbone(x)
@@ -51,7 +54,6 @@ class TRANSAR(L.LightningModule):
         heatmap = self.head(features)
         return heatmap
     
-
     def predict(self, x):
         self.eval()
         with torch.no_grad():
@@ -59,7 +61,6 @@ class TRANSAR(L.LightningModule):
             pred = self.detect(heatmap)
         return pred
     
-
     def detect(self, heatmap_logits):
         """
         Detect objects from heatmap logits.
@@ -86,7 +87,6 @@ class TRANSAR(L.LightningModule):
 
         return pred
     
-
     def training_step(self, batch, batch_idx):
         '''
         Args:
@@ -130,9 +130,14 @@ class TRANSAR(L.LightningModule):
         # Compute loss
         loss = self.loss(heatmap_pred, target_heatmap)
 
+        # Accumulate F1 components on training data (for adaptive sampling)
+        tp, fp, fn = self._compute_f1_components(heatmap_pred, target_heatmap)
+        self.train_tp += tp
+        self.train_fp += fp
+        self.train_fn += fn
+
         return loss
     
-
     def validation_step(self, batch, batch_idx):
         x = batch['image']  # [B, C, H, W]
         boxes = batch['boxes']  # List of [N_i, 4] tensors
@@ -179,18 +184,45 @@ class TRANSAR(L.LightningModule):
         self.val_fp += fp
         self.val_fn += fn
 
-        self.log('val_loss', loss, prog_bar=True)
-        # self.log('val_accuracy', accuracy, prog_bar=True)
+        self.log('val_loss', loss, prog_bar=True, sync_dist=True)
 
         return loss
+
+    def on_train_epoch_end(self):
+        """
+        Lightning hook called at the end of training epoch.
+
+        Computes F1 score on training data for use in adaptive sampling.
+        This prevents data leakage by using only training data performance.
+        """
+        # Compute F1 score from accumulated training metrics
+        if self.train_tp + self.train_fp > 0:
+            precision = self.train_tp / (self.train_tp + self.train_fp)
+        else:
+            precision = 0.0
+
+        if self.train_tp + self.train_fn > 0:
+            recall = self.train_tp / (self.train_tp + self.train_fn)
+        else:
+            recall = 0.0
+
+        if precision + recall > 0:
+            self.train_f1_score = 2 * (precision * recall) / (precision + recall)
+        else:
+            self.train_f1_score = 0.0
+
+        # Log training F1 components
+        self.log('train_f1', self.train_f1_score, prog_bar=True, sync_dist=True)
+        self.log('train_precision', precision, prog_bar=False, sync_dist=True)
+        self.log('train_recall', recall, prog_bar=False, sync_dist=True)
 
     def on_validation_epoch_end(self):
         """
         Lightning hook called at the end of validation epoch.
 
-        Computes F1 score for use in adaptive sampling.
+        Computes F1 score on validation data for monitoring only.
         """
-        # Compute F1 score from accumulated metrics
+        # Compute F1 score from accumulated validation metrics
         if self.val_tp + self.val_fp > 0:
             precision = self.val_tp / (self.val_tp + self.val_fp)
         else:
@@ -206,9 +238,9 @@ class TRANSAR(L.LightningModule):
         else:
             self.val_f1_score = 0.0
 
-        # Log F1 components
-        self.log('val_f1', self.val_f1_score, prog_bar=True)
-        self.log('val_precision', precision, prog_bar=False)
+        # Log validation F1 components (for monitoring only, not used in adaptive sampling)
+        self.log('val_f1', self.val_f1_score, prog_bar=True, sync_dist=True)
+        self.log('val_precision', precision, prog_bar=False, sync_dist=True)
         self.log('val_recall', recall, prog_bar=False, sync_dist=True)
 
     def _compute_f1_components(self, pred_logits, target, threshold=0.5):
@@ -237,7 +269,6 @@ class TRANSAR(L.LightningModule):
 
         return tp, fp, fn
     
-
     def configure_optimizers(self):
         optimizer = torch.optim.AdamW(
             self.parameters(),
@@ -261,13 +292,18 @@ class TRANSAR(L.LightningModule):
 
         Updates adaptive sampling distribution and loss weights based on:
         - Current epoch number
-        - F1 score from previous validation
+        - F1 score from previous training epoch (prevents data leakage)
         """
+        # Reset training metrics at the start of each epoch
+        self.train_tp = 0
+        self.train_fp = 0
+        self.train_fn = 0
+
         if self.adaptive_sampler is not None:
-            # Compute new target distribution and loss weights
+            # Compute new target distribution and loss weights using TRAINING F1 score
             d_target = self.adaptive_sampler.compute_d_target(
                 epoch=self.current_epoch,
-                f1_score=self.val_f1_score
+                f1_score=self.train_f1_score  # Use training F1, not validation F1
             )
             loss_weights = self.adaptive_sampler.compute_loss_weights(d_target)
 
@@ -384,7 +420,6 @@ class TRANSAR(L.LightningModule):
         
         return heatmap_blurred
     
-
     def _yolo_to_heatmap_multiclass(self, bboxes, labels, size, sigma=2.0, num_classes=None):
         """Convert YOLO boxes to multi-class heatmap representation with Gaussian blobs.
 
@@ -481,7 +516,6 @@ class TRANSAR(L.LightningModule):
         
         return heatmap_blurred
 
-    
     def _create_gaussian_kernel_2d(self, kernel_size, sigma):
         """Create a 2D Gaussian kernel.
 

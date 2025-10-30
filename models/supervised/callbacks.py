@@ -5,68 +5,6 @@ from pathlib import Path
 from torch.utils.data import DataLoader
 
 
-class DataLoaderRecreationCallback(L.Callback):
-    """
-    Lightning callback that updates the training sampler weights at each epoch.
-
-    This ensures that the WeightedRandomSampler reflects the current epoch's
-    target distribution d_target(t), allowing the curriculum learning strategy
-    to progressively shift from imbalanced to balanced sampling.
-
-    Instead of recreating the entire dataloader (which breaks Lightning's internal
-    state management), this callback updates the sampler's weights in-place.
-
-    Note: This callback is no longer needed with the new approach, but kept for
-    backward compatibility. The sampler weight update now happens in the model's
-    on_train_epoch_start hook.
-    """
-
-    def __init__(self):
-        super().__init__()
-        print("Warning: DataLoaderRecreationCallback is deprecated. "
-              "Sampler updates now happen in model's on_train_epoch_start hook.")
-
-    def on_train_epoch_start(self, trainer, pl_module):
-        """
-        Called at the start of each training epoch.
-
-        Updates the sampler weights in-place based on the current epoch
-        and previous F1 score.
-        """
-        # Only proceed if adaptive sampling is enabled
-        if pl_module.adaptive_sampler is None:
-            return
-
-        # Get the current epoch number and F1 score
-        current_epoch = trainer.current_epoch
-        f1_score = pl_module.val_f1_score
-
-        # Get the sampler from the dataloader
-        train_dataloader = trainer.train_dataloader
-        if hasattr(train_dataloader, 'sampler'):
-            sampler = train_dataloader.sampler
-        elif hasattr(train_dataloader, 'batch_sampler'):
-            # In case of batch sampler
-            sampler = train_dataloader.batch_sampler.sampler
-        else:
-            print("Warning: Could not find sampler in dataloader")
-            return
-
-        # Update sampler weights in-place
-        pl_module.adaptive_sampler.update_sampler_weights(
-            sampler=sampler,
-            epoch=current_epoch,
-            f1_score=f1_score
-        )
-
-        # Log info every 10 epochs
-        if current_epoch % 10 == 0:
-            info = pl_module.adaptive_sampler.get_distribution_info()
-            print(f"\n[Epoch {current_epoch}] Updated sampler weights in-place")
-            print(f"  d_target: FG={info['d_target'][1]:.4f}, BG={info['d_target'][0]:.4f}")
-            print(f"  F1 score: {f1_score:.4f}\n")
-
-
 class AdaptiveSamplingCallback(L.Callback):
     """
     Lightning callback for monitoring and logging adaptive sampling behavior.
@@ -80,7 +18,7 @@ class AdaptiveSamplingCallback(L.Callback):
     Optionally creates plots of distribution evolution.
     """
 
-    def __init__(self, log_dir=None, plot_frequency=10):
+    def __init__(self, log_dir=None, plot_frequency=10, print_frequency=1):
         """
         Args:
             log_dir: Directory to save plots (if None, no plots are saved)
@@ -89,6 +27,7 @@ class AdaptiveSamplingCallback(L.Callback):
         super().__init__()
         self.log_dir = Path(log_dir) if log_dir else None
         self.plot_frequency = plot_frequency
+        self.print_frequency = print_frequency
 
         # Storage for tracking evolution
         self.epochs = []
@@ -129,11 +68,11 @@ class AdaptiveSamplingCallback(L.Callback):
         pl_module.log('adaptive/f1_score', info['f1_score'], on_step=False, on_epoch=True)
 
         # Print summary
-        if trainer.current_epoch % 10 == 0:
+        if trainer.current_epoch % self.print_frequency == 0:
             print(f"\n[Epoch {trainer.current_epoch}] Adaptive Sampling:")
             print(f"  d_target: FG={info['d_target'][1]:.4f}, BG={info['d_target'][0]:.4f}")
             print(f"  Loss weights: FG={info['loss_weights'][1]:.4f}, BG={info['loss_weights'][0]:.4f}")
-            print(f"  F1 score: {info['f1_score']:.4f}\n")
+            print(f"  Training F1 score: {info['f1_score']:.4f}\n")
 
     def on_train_epoch_end(self, trainer, pl_module):
         """
@@ -173,10 +112,10 @@ class AdaptiveSamplingCallback(L.Callback):
 
         # Plot 3: F1 Score
         ax3 = axes[1, 0]
-        ax3.plot(self.epochs, self.f1_scores, label='F1 Score', marker='o', markersize=3, color='green')
+        ax3.plot(self.epochs, self.f1_scores, label='Training F1 Score', marker='o', markersize=3, color='green')
         ax3.set_xlabel('Epoch')
         ax3.set_ylabel('F1 Score')
-        ax3.set_title('Validation F1 Score (for h(t))')
+        ax3.set_title('Training F1 Score (for h(t))')
         ax3.legend()
         ax3.grid(True, alpha=0.3)
         ax3.set_ylim([0, 1])
@@ -238,11 +177,11 @@ class AdaptiveSamplingCallback(L.Callback):
 
         # Plot 3: F1 Score
         ax3 = axes[1, 0]
-        ax3.plot(self.epochs, self.f1_scores, label='F1 Score', marker='o', linewidth=2, color='green')
+        ax3.plot(self.epochs, self.f1_scores, label='Training F1 Score', marker='o', linewidth=2, color='green')
         ax3.fill_between(self.epochs, self.f1_scores, alpha=0.3, color='green')
         ax3.set_xlabel('Epoch', fontsize=12)
         ax3.set_ylabel('F1 Score', fontsize=12)
-        ax3.set_title('Validation F1 Score (h(t) component)', fontsize=13, fontweight='bold')
+        ax3.set_title('Training F1 Score (h(t) component)', fontsize=13, fontweight='bold')
         ax3.legend(fontsize=11)
         ax3.grid(True, alpha=0.3)
         ax3.set_ylim([0, 1.05])
@@ -260,14 +199,14 @@ class AdaptiveSamplingCallback(L.Callback):
         ax4.tick_params(axis='y', labelcolor='purple')
 
         # Plot F1 on right axis
-        line2 = ax4_twin.plot(self.epochs, self.f1_scores, label='F1 Score', marker='s', linewidth=2, color='green', alpha=0.7)
-        ax4_twin.set_ylabel('F1 Score', fontsize=12, color='green')
+        line2 = ax4_twin.plot(self.epochs, self.f1_scores, label='Training F1', marker='s', linewidth=2, color='green', alpha=0.7)
+        ax4_twin.set_ylabel('Training F1 Score', fontsize=12, color='green')
         ax4_twin.tick_params(axis='y', labelcolor='green')
         ax4_twin.set_ylim([0, 1.05])
 
         # Combine legends
         lines = line1 + line2 + [plt.Line2D([0], [0], color='red', linestyle='--', linewidth=2)]
-        labels = ['FG/BG Ratio', 'F1 Score', 'Balanced']
+        labels = ['FG/BG Ratio', 'Training F1', 'Balanced']
         ax4.legend(lines, labels, loc='upper left', fontsize=10)
 
         ax4.set_title('Sampling Balance vs Performance', fontsize=13, fontweight='bold')

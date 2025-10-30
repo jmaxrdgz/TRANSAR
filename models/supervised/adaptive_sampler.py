@@ -109,7 +109,8 @@ class AdaptiveSampler:
 
         Args:
             epoch: Current epoch number (0-indexed)
-            f1_score: F1 score from validation for h(t). If None, uses previous score.
+            f1_score: F1 score from TRAINING data for h(t). If None, uses previous score.
+                     Using training F1 prevents data leakage.
 
         Returns:
             Tensor of shape [num_classes] with target distribution
@@ -174,7 +175,8 @@ class AdaptiveSampler:
         Higher F1 means better performance, so we move toward balanced sampling faster.
 
         Args:
-            f1_score: F1 score from validation (0 to 1)
+            f1_score: F1 score from TRAINING data (0 to 1). Using training F1 prevents
+                     data leakage by not using validation set information.
 
         Returns:
             Performance value in [0, 1]
@@ -249,7 +251,7 @@ class AdaptiveSampler:
 
         Args:
             epoch: Current epoch number
-            f1_score: F1 score from validation
+            f1_score: F1 score from TRAINING data (prevents data leakage)
             num_samples: Number of samples to draw. If None, uses dataset length.
 
         Returns:
@@ -297,7 +299,7 @@ class AdaptiveSampler:
         Args:
             sampler: Existing WeightedRandomSampler to update
             epoch: Current epoch number
-            f1_score: F1 score from validation
+            f1_score: F1 score from TRAINING data (prevents data leakage)
         """
         # Compute target distribution for this epoch
         self.d_target = self.compute_d_target(epoch, f1_score)
