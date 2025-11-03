@@ -1,7 +1,65 @@
 # config_pretrain.yaml
-
-# TODO: Make config loggable with lightning
-# TODO: make training work for every input size
+# SimMIM Pretraining Configuration
 
 SEED: 42
+
+MODEL:
+  # Backbone selection - choose from:
+  # Swin v1: swin_tiny, swin_small
+  # Swin v2: swinv2_tiny_w8, swinv2_tiny_w16, swinv2_small_w8, swinv2_small_w16
+  BACKBONE: swinv2_tiny_w8
+
+  IN_CHANS: 1                    # 1 for SAR, 3 for RGB
+  MASK_RATIO: 0.6                # Proportion of patches to mask (SimMIM default: 0.6)
+  RESUME: null                   # Path to checkpoint to resume from
+
+DATA:
+  # Input size must satisfy:
+  # 1. Divisible by patch_size (4)
+  # 2. (img_size / patch_size) divisible by window_size
+  # For window_size=8, patch_size=4: valid sizes are 128, 192, 256, 320, 384, 512
+  IMG_SIZE: 256
+
+  TRAIN_DATA: dataset/pretrain/unlabeled
+  NUM_WORKERS: 8
+
+  # SAR normalization: x_norm = (x - μ_c) / σ_g
+  # Set to null to disable normalization
+  # Use scripts/compute_global_std.py to compute from your training data
+  GLOBAL_STD: null              # Set this to the global std of your training dataset
+
+  # Optional: Capella-specific logarithmic normalization
+  # Set to 16 for Capella SAR data as used in TRANSAR paper
+  # Set to null for other SAR data (default)
+  # NOTE: Do NOT apply log2 normalization during chip preprocessing if using this
+  S_NORM: null                  # Normalization scale constant for log2(x) / s_norm
+
+TRAIN:
+  BATCH_SIZE: 128               # Larger batch for pretraining (reduce if OOM)
+  EPOCHS: 300                   # SimMIM typically trains 100-800 epochs
+  LR: 0.001                     # Base learning rate (scaled with batch size)
+  WEIGHT_DECAY: 0.05            # AdamW weight decay
+  WARMUP_EPOCHS: 10             # Linear warmup epochs
+  CLIP_GRAD: 5.0                # Gradient clipping
+  N_GPU: 2                      # Number of GPUs
+
+# Experimentation guide:
+#
+# Test different backbones:
+#   MODEL.BACKBONE: swin_tiny / swinv2_tiny_w8 / swinv2_tiny_w16
+#
+# Test different input sizes (must be compatible with window size):
+#   For window=8: DATA.IMG_SIZE: 192 / 256 / 320 / 384
+#   For window=16: DATA.IMG_SIZE: 256 / 320 / 384 / 512
+#
+# Test different mask ratios:
+#   MODEL.MASK_RATIO: 0.4 / 0.6 / 0.75
+#
+# Adjust batch size for your GPU memory:
+#   TRAIN.BATCH_SIZE: 64 / 128 / 256
+#
+# CLI override examples:
+#   python pretrain.py --override MODEL.BACKBONE=swinv2_tiny_w16
+#   python pretrain.py --override DATA.IMG_SIZE=192 TRAIN.BATCH_SIZE=256
+#   python pretrain.py --override MODEL.MASK_RATIO=0.75
 
