@@ -14,10 +14,29 @@ This implementation provides a complete SimMIM (Simple Framework for Masked Imag
 ### Key Components
 
 1. **Learnable Mask Token**: Replaces masked patches (critical difference from MAE)
-2. **Full Sequence Encoding**: All patches pass through encoder (masked ones use mask token)
-3. **Simple Linear Decoder**: Minimal decoder (just linear projection)
-4. **L1 Loss**: Better than MSE for pixel reconstruction
-5. **Masked-only Loss**: Only compute loss on masked patches
+2. **Block-wise Masking**: Mask contiguous blocks of patches (8×8 blocks per TRANSAR)
+3. **Full Sequence Encoding**: All patches pass through encoder (masked ones use mask token)
+4. **Simple Linear Decoder**: Minimal decoder (just linear projection)
+5. **L1 Loss**: Better than MSE for pixel reconstruction
+6. **Masked-only Loss**: Only compute loss on masked patches
+
+### Block-wise Masking (TRANSAR Approach)
+
+Instead of randomly masking individual patches, TRANSAR uses **block-wise masking**:
+- Patches are grouped into blocks (e.g., 8×8 blocks)
+- Entire blocks are masked together
+- Creates contiguous masked regions
+
+**Why block-wise masking?**
+- `mask_size=4`: Too small, creates blurry reconstructions
+- `mask_size=8`: **Optimal** - best detection scores in finetuning
+- `mask_size>8`: Too large, ignores background intensity variations
+
+For 512×512 images with patch_size=4 and mask_size=8:
+- 128×128 = 16,384 total patches
+- 16×16 = 256 blocks
+- Each block contains 8×8 = 64 patches
+- With mask_ratio=0.6: mask ~154 blocks (~9,830 patches)
 
 ### Backbone Options
 
@@ -33,7 +52,7 @@ Swin v2 (Variable resolution, continuous position bias):
 - swinv2_small_w16  (256x256, window=16)
 ```
 
-**Recommendation**: Use `swinv2_tiny_w8` for best compatibility with your finetuning pipeline.
+**Recommendation**: Use `swinv2_tiny_w8` with 512×512 images (TRANSAR paper configuration).
 
 ## Usage
 
@@ -53,20 +72,28 @@ Edit `configs/config_pretrain.yaml`:
 
 ```yaml
 MODEL:
-  BACKBONE: swinv2_tiny_w8  # Choose backbone
+  BACKBONE: swinv2_tiny_w8  # Swin v2 Tiny, window_size=8
   IN_CHANS: 1               # 1 for SAR, 3 for RGB
-  MASK_RATIO: 0.6           # 40-75% typical
+  MASK_RATIO: 0.6           # Proportion of blocks to mask
+  MASK_SIZE: 8              # Block-wise masking (8×8 blocks) - TRANSAR optimal
 
 DATA:
-  IMG_SIZE: 256             # Must be compatible with window size
+  IMG_SIZE: 512             # TRANSAR paper uses 512×512
   TRAIN_DATA: dataset/pretrain/unlabeled
+  GLOBAL_STD: null          # Compute with scripts/compute_global_std.py
 
 TRAIN:
-  BATCH_SIZE: 128           # Adjust for GPU memory
+  BATCH_SIZE: 64            # Adjust for GPU memory (512×512 uses more memory)
   EPOCHS: 300
   LR: 0.001
   N_GPU: 2
 ```
+
+**Key parameters from TRANSAR paper:**
+- `IMG_SIZE: 512` - Larger than typical SimMIM (224/256) for SAR detail
+- `MASK_SIZE: 8` - Block-wise masking creates structured occlusions
+- `MASK_RATIO: 0.6` - 60% of blocks masked
+- `window_size: 8` - Compatible with 512 image size
 
 ### CLI Overrides
 
