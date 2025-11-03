@@ -30,7 +30,12 @@ DATA:
   # For window_size=8, patch_size=4, mask_size=8: 512 is valid (512/4=128, 128%8=0, 128%8=0)
   IMG_SIZE: 512
 
-  TRAIN_DATA: dataset/pretrain/unlabeled
+  # Dataset format: 'npy' for individual files, 'hdf5' for single HDF5 file
+  # - 'npy': Individual .npy files per chip (simple, good for small datasets)
+  # - 'hdf5': Single HDF5 file with all chips (faster I/O, good for large datasets)
+  FORMAT: npy
+
+  TRAIN_DATA: dataset/pretrain/unlabeled  # For npy: directory, for hdf5: .h5 file path
   NUM_WORKERS: 8
 
   # SAR normalization: x_norm = (x - μ_c) / σ_g
@@ -68,8 +73,13 @@ TRAIN:
 # Adjust batch size for your GPU memory:
 #   TRAIN.BATCH_SIZE: 64 / 128 / 256
 #
+# Switch between dataset formats:
+#   DATA.FORMAT: npy  # Individual .npy files
+#   DATA.FORMAT: hdf5 # Single HDF5 file (faster for large datasets)
+#
 # CLI override examples:
 #   python pretrain.py --override MODEL.BACKBONE=swinv2_tiny_w16
-#   python pretrain.py --override DATA.IMG_SIZE=192 TRAIN.BATCH_SIZE=256
-#   python pretrain.py --override MODEL.MASK_RATIO=0.75
+#   python pretrain.py --override DATA.IMG_SIZE=384 TRAIN.BATCH_SIZE=64
+#   python pretrain.py --override MODEL.MASK_SIZE=4 MODEL.MASK_RATIO=0.5
+#   python pretrain.py --override DATA.FORMAT=hdf5 DATA.TRAIN_DATA=dataset/chips.h5
 

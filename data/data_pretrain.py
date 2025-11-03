@@ -1,5 +1,6 @@
-from pathlib import Path
+from typing import Optional
 import numpy as np
+import h5py
 
 import torch
 from torch.utils.data import DataLoader, Dataset
@@ -103,11 +104,23 @@ def build_loader(config):
 
     transform = transforms.Compose(transform_list)
 
-    # Create dataset
-    train_set = NpyDataset(
-        folder=config.DATA.TRAIN_DATA,
-        transform=transform
-    )
+    # Create dataset based on format
+    data_format = config.DATA.FORMAT.lower() if hasattr(config.DATA, 'FORMAT') else 'npy'
+
+    if data_format == 'hdf5':
+        print(f"[DataLoader] Using HDF5 dataset format")
+        train_set = SARChipDataset(
+            hdf5_path=config.DATA.TRAIN_DATA,
+            transform=transform
+        )
+    elif data_format == 'npy':
+        print(f"[DataLoader] Using NPY dataset format")
+        train_set = SARChipDatasetNPY(
+            npy_dir=config.DATA.TRAIN_DATA,
+            transform=transform
+        )
+    else:
+        raise ValueError(f"Unknown data format: {data_format}. Choose 'npy' or 'hdf5'")
 
     print(f"[DataLoader] Loaded {len(train_set)} images from {config.DATA.TRAIN_DATA}")
     print(f"[DataLoader] Image size: {config.DATA.IMG_SIZE}")
@@ -125,29 +138,135 @@ def build_loader(config):
     )
 
     return train_loader
+    
+
+class SARChipDataset(Dataset):
+    """
+    PyTorch Dataset for SAR chips stored in HDF5 format.
+    
+    Features:
+    - Memory-efficient: doesn't load entire dataset into RAM
+    - Fast random access via HDF5
+    - Supports standard PyTorch DataLoader with multiple workers
+    """
+    
+    def __init__(
+        self,
+        hdf5_path: str,
+        transform: Optional[callable] = None,
+    ):
+        """
+        Args:
+            hdf5_path: Path to HDF5 file containing chips
+            transform: Optional transform to apply to chips
+        """
+        self.hdf5_path = hdf5_path
+        self.transform = transform
+        
+        # Open file to get metadata
+        with h5py.File(hdf5_path, 'r') as f:
+            self.num_chips = f.attrs['num_chips']
+            self.chip_size = f.attrs['chip_size']
+            
+            # Load chip names if needed
+            if 'chip_names' in f:
+                self.chip_names = [
+                    name.decode('utf-8') if isinstance(name, bytes) else name
+                    for name in f['chip_names'][:]
+                ]
+            else:
+                self.chip_names = [f"chip_{i}" for i in range(self.num_chips)]
+        
+        # Each worker will open its own file handle
+        self._file = None
+        self._dataset = None
+    
+    def __len__(self):
+        return self.num_chips
+    
+    def __getitem__(self, idx: int) -> torch.Tensor:
+        # Lazy open file (important for multiprocessing)
+        if self._file is None:
+            self._file = h5py.File(self.hdf5_path, 'r')
+            self._dataset = self._file['chips']
+        
+        # Load chip
+        chip = self._dataset[idx].astype(np.float32)
+
+        # Ensure 3D array: [C, H, W]
+        if chip.ndim == 2:
+            chip = chip[np.newaxis, :]  # Add channel dimension
+
+        # Convert to torch tensor
+        chip = torch.from_numpy(chip)
+
+        # Apply transforms
+        if self.transform:
+            chip = self.transform(chip)
+
+        return chip, 0  # Dummy label for unsupervised learning
+    
+    def __del__(self):
+        # Clean up file handle
+        if self._file is not None:
+            self._file.close()
+    
+    def get_chip_name(self, idx: int) -> str:
+        """Get the name/identifier of a chip."""
+        return self.chip_names[idx]
 
 
-class NpyDataset(Dataset):
-    def __init__(self, folder, transform=None):
-        self.folder = folder
-        self.files = sorted(Path(folder).glob("*.npy"))
+class SARChipDatasetNPY(Dataset):
+    """
+    Efficient dataset for loading SAR chips from individual .npy files.
+
+    Keeps single-channel SAR data without unnecessary conversions.
+    Normalization is applied via transform pipeline, not built-in.
+    """
+
+    def __init__(
+        self,
+        npy_dir: str,
+        transform: Optional[callable] = None
+    ):
+        """
+        Args:
+            npy_dir: Directory containing .npy chip files
+            transform: Optional transform pipeline (augmentation + normalization)
+            normalize: If True, apply built-in normalization (deprecated - use transform pipeline)
+        """
+        from pathlib import Path
+
+        self.npy_dir = Path(npy_dir)
         self.transform = transform
 
+        # Find all .npy files
+        self.chip_files = sorted(list(self.npy_dir.glob("*.npy")))
+
+        if len(self.chip_files) == 0:
+            raise ValueError(f"No .npy files found in {npy_dir}")
+
     def __len__(self):
-        return len(self.files)
+        return len(self.chip_files)
 
-    def __getitem__(self, idx):
-        arr = np.load(self.files[idx])
-        if arr.ndim == 2:
-            arr = arr[np.newaxis, :, :]
+    def __getitem__(self, idx: int) -> tuple:
+        # Load chip
+        chip = np.load(self.chip_files[idx]).astype(np.float32)
 
-        img = torch.from_numpy(arr).float()
+        # Ensure 3D array: [C, H, W]
+        if chip.ndim == 2:
+            chip = chip[np.newaxis, :, :]  # Add channel dimension
 
+        # Convert to torch tensor
+        chip = torch.from_numpy(chip)
+
+        # Apply transform pipeline (augmentation + normalization)
         if self.transform:
-            img = self.transform(img)
+            chip = self.transform(chip)
 
-        assert img.shape[0] in [1, 3], "Image must have 1 or 3 channels"
-        if img.shape[0] == 1:
-            img = img.repeat(3, 1, 1)
+        # Return single-channel image (efficient for SAR)
+        # No conversion to 3 channels - happens in model if needed
+        return chip, 0  # Dummy label for unsupervised learning
 
-        return img, 0
+    def get_chip_name(self, idx: int) -> str:
+        return self.chip_files[idx].stem

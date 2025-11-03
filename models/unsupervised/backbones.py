@@ -5,6 +5,7 @@ Provides factory functions to create Swin Transformer backbones
 with various configurations (v1/v2, different window sizes).
 """
 
+import torch
 import timm
 
 
@@ -64,6 +65,11 @@ def create_backbone(backbone_name, in_chans=3, pretrained=False):
     """
     Create a Swin backbone from configuration.
 
+    Handles channel mismatch when loading ImageNet weights for 1-channel SAR:
+    - If in_chans=1 and pretrained=True: Average RGB conv weights to single channel
+    - If in_chans=1 and pretrained=False: Create 1-channel model from scratch (efficient)
+    - If in_chans=3: Standard RGB model
+
     Args:
         backbone_name: Name from BACKBONE_CONFIGS
         in_chans: Number of input channels (1 for SAR, 3 for RGB)
@@ -81,13 +87,51 @@ def create_backbone(backbone_name, in_chans=3, pretrained=False):
 
     backbone_cfg = BACKBONE_CONFIGS[backbone_name]
 
-    # Create model without classification head
-    model = timm.create_model(
-        backbone_cfg['model_name'],
-        pretrained=pretrained,
-        num_classes=0,  # Remove classification head
-        global_pool='',  # Remove global pooling
-        in_chans=in_chans
-    )
+    if pretrained and in_chans != 3:
+        # Load with 3 channels first, then adapt
+        print(f"[Backbone] Loading ImageNet weights with channel adaptation (3→{in_chans})")
+        model = timm.create_model(
+            backbone_cfg['model_name'],
+            pretrained=True,
+            num_classes=0,
+            global_pool='',
+            in_chans=3  # Load with RGB
+        )
+
+        # Adapt first conv layer: average RGB weights to single channel
+        first_conv = model.patch_embed.proj  # Swin's first conv layer
+        with torch.no_grad():
+            # Average across input channels: [out_ch, 3, h, w] -> [out_ch, 1, h, w]
+            new_weight = first_conv.weight.mean(dim=1, keepdim=True)
+            # Create new conv layer
+            new_conv = torch.nn.Conv2d(
+                in_channels=in_chans,
+                out_channels=first_conv.out_channels,
+                kernel_size=first_conv.kernel_size,
+                stride=first_conv.stride,
+                padding=first_conv.padding,
+                bias=first_conv.bias is not None
+            )
+            new_conv.weight.copy_(new_weight)
+            if first_conv.bias is not None:
+                new_conv.bias.copy_(first_conv.bias)
+
+            # Replace conv layer
+            model.patch_embed.proj = new_conv
+
+        print(f"[Backbone] Adapted first conv: 3 channels → {in_chans} channel (averaged weights)")
+
+    else:
+        # Create model directly with desired channels
+        model = timm.create_model(
+            backbone_cfg['model_name'],
+            pretrained=pretrained,
+            num_classes=0,  # Remove classification head
+            global_pool='',  # Remove global pooling
+            in_chans=in_chans
+        )
+
+        if not pretrained and in_chans == 1:
+            print(f"[Backbone] Created {backbone_name} from scratch with {in_chans} channel (efficient)")
 
     return model, backbone_cfg
