@@ -11,14 +11,24 @@ MODEL:
 
   IN_CHANS: 1                    # 1 for SAR, 3 for RGB
   MASK_RATIO: 0.6                # Proportion of patches to mask (SimMIM default: 0.6)
+
+
+  # Block-wise masking (TRANSAR paper)
+  # Instead of masking random individual patches, mask contiguous blocks
+  # TRANSAR found mask_size=8 gives best results (Section C.1)
+  # - mask_size=4: too small, creates blurry reconstructions
+  # - mask_size>8: too large, ignores background variations
+  MASK_SIZE: 8                   # Size of block to mask (8x8 blocks of patches)
+
   RESUME: null                   # Path to checkpoint to resume from
 
 DATA:
   # Input size must satisfy:
   # 1. Divisible by patch_size (4)
   # 2. (img_size / patch_size) divisible by window_size
-  # For window_size=8, patch_size=4: valid sizes are 128, 192, 256, 320, 384, 512
-  IMG_SIZE: 256
+  # 3. (img_size / patch_size) divisible by mask_size for block-wise masking
+  # For window_size=8, patch_size=4, mask_size=8: 512 is valid (512/4=128, 128%8=0, 128%8=0)
+  IMG_SIZE: 512
 
   TRAIN_DATA: dataset/pretrain/unlabeled
   NUM_WORKERS: 8
@@ -35,8 +45,8 @@ DATA:
   S_NORM: null                  # Normalization scale constant for log2(x) / s_norm
 
 TRAIN:
-  BATCH_SIZE: 128               # Larger batch for pretraining (reduce if OOM)
-  EPOCHS: 300                   # SimMIM typically trains 100-800 epochs
+  BATCH_SIZE: 16                # 16 in TRANSAR paper
+  EPOCHS: 100                   # 100 for TRANSAR pretraining
   LR: 0.001                     # Base learning rate (scaled with batch size)
   WEIGHT_DECAY: 0.05            # AdamW weight decay
   WARMUP_EPOCHS: 10             # Linear warmup epochs
