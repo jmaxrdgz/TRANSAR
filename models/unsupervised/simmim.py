@@ -46,7 +46,8 @@ class SimMIM(L.LightningModule):
         self.encoder, self.backbone_cfg = create_backbone(
             config.MODEL.BACKBONE,
             in_chans=config.MODEL.IN_CHANS,
-            pretrained=True
+            pretrained=True,
+            img_size=config.DATA.IMG_SIZE
         )
 
         self.patch_size = self.backbone_cfg['patch_size']

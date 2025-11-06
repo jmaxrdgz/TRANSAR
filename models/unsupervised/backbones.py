@@ -61,7 +61,7 @@ BACKBONE_CONFIGS = {
 }
 
 
-def create_backbone(backbone_name, in_chans=3, pretrained=False):
+def create_backbone(backbone_name, in_chans=3, pretrained=False, img_size=None):
     """
     Create a Swin backbone from configuration.
 
@@ -70,10 +70,15 @@ def create_backbone(backbone_name, in_chans=3, pretrained=False):
     - If in_chans=1 and pretrained=False: Create 1-channel model from scratch (efficient)
     - If in_chans=3: Standard RGB model
 
+    Handles resolution mismatch when using pretrained weights at different resolution:
+    - Swin v2 uses Log-CPB which smoothly transfers pretrained weights to different resolutions
+    - Example: pretrained at 256x256 can be used at 512x512
+
     Args:
         backbone_name: Name from BACKBONE_CONFIGS
         in_chans: Number of input channels (1 for SAR, 3 for RGB)
         pretrained: Whether to use ImageNet pretrained weights
+        img_size: Input image size (if None, uses default from config)
 
     Returns:
         backbone: Swin model
@@ -86,6 +91,7 @@ def create_backbone(backbone_name, in_chans=3, pretrained=False):
         raise ValueError(f"Unknown backbone: {backbone_name}. Choose from {list(BACKBONE_CONFIGS.keys())}")
 
     backbone_cfg = BACKBONE_CONFIGS[backbone_name]
+    target_img_size = img_size or backbone_cfg['img_size']
 
     if pretrained and in_chans != 3:
         # Load with 3 channels first, then adapt
@@ -95,6 +101,7 @@ def create_backbone(backbone_name, in_chans=3, pretrained=False):
             pretrained=True,
             num_classes=0,
             global_pool='',
+            img_size=target_img_size,
             in_chans=3  # Load with RGB
         )
 
@@ -128,10 +135,14 @@ def create_backbone(backbone_name, in_chans=3, pretrained=False):
             pretrained=pretrained,
             num_classes=0,  # Remove classification head
             global_pool='',  # Remove global pooling
+            img_size=target_img_size,
             in_chans=in_chans
         )
 
         if not pretrained and in_chans == 1:
             print(f"[Backbone] Created {backbone_name} from scratch with {in_chans} channel (efficient)")
+
+    if img_size and img_size != backbone_cfg['img_size']:
+        print(f"[Backbone] Using resolution {img_size}x{img_size} (pretrained at {backbone_cfg['img_size']}x{backbone_cfg['img_size']})")
 
     return model, backbone_cfg

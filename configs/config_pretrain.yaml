@@ -28,7 +28,11 @@ DATA:
   # 2. (img_size / patch_size) divisible by window_size
   # 3. (img_size / patch_size) divisible by mask_size for block-wise masking
   # For window_size=8, patch_size=4, mask_size=8: 512 is valid (512/4=128, 128%8=0, 128%8=0)
-  IMG_SIZE: 256                  # 512 in TRANSAR paper
+  #
+  # NOTE: You can use different resolution than ImageNet pretrained weights (256x256)!
+  # Swin v2's Log-CPB design smoothly transfers pretrained weights to higher resolutions.
+  # Example: Set IMG_SIZE=512 to use TRANSAR paper resolution with ImageNet initialization.
+  IMG_SIZE: 512                  # 512 in TRANSAR paper
 
   # Dataset format: 'npy' for individual files, 'hdf5' for single HDF5 file
   # - 'npy': Individual .npy files per chip (simple, good for small datasets)
@@ -41,7 +45,7 @@ DATA:
   # SAR normalization: x_norm = (x - μ_c) / σ_g
   # Set to null to disable normalization
   # Use scripts/compute_global_std.py to compute from your training data
-  GLOBAL_STD: null              # Set this to the global std of your training dataset
+  GLOBAL_STD: 1.57              # Set this to the global std of your training dataset
 
   # Optional: Capella-specific logarithmic normalization
   # Set to 16 for Capella SAR data as used in TRANSAR paper
