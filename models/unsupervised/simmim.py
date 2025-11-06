@@ -46,7 +46,7 @@ class SimMIM(L.LightningModule):
         self.encoder, self.backbone_cfg = create_backbone(
             config.MODEL.BACKBONE,
             in_chans=config.MODEL.IN_CHANS,
-            pretrained=False  # Always train from scratch for pretraining
+            pretrained=True
         )
 
         self.patch_size = self.backbone_cfg['patch_size']
@@ -238,8 +238,11 @@ class SimMIM(L.LightningModule):
         # For Swin, we need to reshape back to spatial format
         x = x.reshape(B, H_p, W_p, -1)  # [B, H', W', C]
 
-        # Forward through Swin stages
-        features = self.encoder.forward_features(x)  # [B, H'', W'', C_final]
+        # Forward through Swin stages (skip patch_embed since we already did it)
+        # Call layers directly instead of forward_features to avoid double patch_embed
+        for layer in self.encoder.layers:
+            x = layer(x)
+        features = self.encoder.norm(x)  # [B, H'', W'', C_final]
 
         # Flatten back to sequence
         if features.ndim == 4:
@@ -325,87 +328,3 @@ class SimMIM(L.LightningModule):
                 'frequency': 1
             }
         }
-
-    def on_train_end(self):
-        """Plot training metrics at the end of training."""
-        try:
-            from tensorboard.backend.event_processing import event_accumulator
-
-            # Get logger directory (lightning_logs/version_X/)
-            if not self.trainer.logger or not hasattr(self.trainer.logger, 'log_dir'):
-                print("No logger directory found")
-                return
-
-            log_dir = Path(self.trainer.logger.log_dir)
-            print(f"Reading metrics from: {log_dir}")
-
-            # Find TensorBoard event file
-            event_files = list(log_dir.glob('events.out.tfevents.*'))
-            if not event_files:
-                print("No TensorBoard event files found")
-                return
-
-            # Load metrics from TensorBoard
-            ea = event_accumulator.EventAccumulator(str(event_files[0]))
-            ea.Reload()
-
-            # Extract scalars
-            train_loss = []
-            loss_visible = []
-            lr_values = []
-
-            if 'train_loss' in ea.Tags()['scalars']:
-                train_loss = [(e.step, e.value) for e in ea.Scalars('train_loss')]
-            if 'loss_visible' in ea.Tags()['scalars']:
-                loss_visible = [(e.step, e.value) for e in ea.Scalars('loss_visible')]
-            if 'lr' in ea.Tags()['scalars']:
-                lr_values = [(e.step, e.value) for e in ea.Scalars('lr')]
-
-            if not train_loss:
-                print("No metrics to plot")
-                return
-
-            # Align all metrics to same steps
-            steps = [s for s, _ in train_loss]
-            train_loss_vals = [v for _, v in train_loss]
-            loss_visible_vals = [v for _, v in loss_visible]
-            lr_vals = [v for _, v in lr_values]
-
-            # Ensure all arrays have same length
-            min_len = min(len(train_loss_vals), len(loss_visible_vals), len(lr_vals))
-            steps = steps[:min_len]
-            train_loss_vals = train_loss_vals[:min_len]
-            loss_visible_vals = loss_visible_vals[:min_len]
-            lr_vals = lr_vals[:min_len]
-
-            # Create figure with subplots
-            _, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 8))
-
-            # Plot losses
-            ax1.plot(steps, train_loss_vals, label='train_loss (masked)', linewidth=2)
-            ax1.plot(steps, loss_visible_vals, label='loss_visible', linewidth=2, alpha=0.8)
-            ax1.set_xlabel('Step')
-            ax1.set_ylabel('Loss (L1)')
-            ax1.set_title('Training Losses')
-            ax1.legend()
-            ax1.grid(True, alpha=0.3)
-
-            # Plot learning rate
-            ax2.plot(steps, lr_vals, label='Learning Rate', linewidth=2, color='green')
-            ax2.set_xlabel('Step')
-            ax2.set_ylabel('Learning Rate')
-            ax2.set_title('Learning Rate Schedule')
-            ax2.legend()
-            ax2.grid(True, alpha=0.3)
-
-            plt.tight_layout()
-
-            # Save figure in the same lightning_logs/version_X/ directory
-            plot_path = log_dir / 'training_metrics.png'
-            plt.savefig(plot_path, dpi=150, bbox_inches='tight')
-            plt.close()
-
-            print(f"\nTraining metrics plot saved to: {plot_path}")
-
-        except Exception as e:
-            print(f"Failed to create training plot: {e}")

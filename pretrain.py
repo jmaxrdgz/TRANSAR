@@ -52,31 +52,19 @@ if __name__ == "__main__":
         model = SimMIM(config)
 
     # Setup callbacks
+    checkpoint_callback = ModelCheckpoint(
+        dirpath=f"checkpoints/pretrain/{config.MODEL.BACKBONE}",
+        filename="simmim-{epoch:03d}-{train_loss:.4f}",
+        save_top_k=3,
+        monitor="train_loss",
+        mode="min",
+        save_last=True,
+        every_n_epochs=config.TRAIN.CHECKPOINT_FREQUENCY
+    )
+
     callbacks = [
         ModelSummary(max_depth=2),
-
-        # Save checkpoints
-        ModelCheckpoint(
-            dirpath=f"checkpoints/pretrain/{config.MODEL.BACKBONE}",
-            filename="simmim-{epoch:03d}-{train_loss:.4f}",
-            save_top_k=3,
-            monitor="train_loss",
-            mode="min",
-            save_last=True,
-            every_n_epochs=10
-        ),
-
-        # Save backbone weights separately (for easy loading in finetuning)
-        ModelCheckpoint(
-            dirpath=f"checkpoints/pretrain/{config.MODEL.BACKBONE}/backbone",
-            filename="backbone-{epoch:03d}",
-            save_top_k=1,
-            monitor="train_loss",
-            mode="min",
-            save_last=True,
-            every_n_epochs=25,
-            save_weights_only=True
-        )
+        checkpoint_callback
     ]
 
     # Create trainer
@@ -105,10 +93,23 @@ if __name__ == "__main__":
 
     trainer.fit(model, train_loader)
 
-    # Save final backbone weights
-    print("\nSaving final backbone weights...")
-    torch.save(
-        model.encoder.state_dict(),
-        f"checkpoints/pretrain/{config.MODEL.BACKBONE}/backbone_final.pth"
-    )
-    print(f"Saved to: checkpoints/pretrain/{config.MODEL.BACKBONE}/backbone_final.pth")
+    # Save backbone weights from best checkpoint
+    print("\nExtracting backbone from best checkpoint...")
+    best_model_path = checkpoint_callback.best_model_path
+
+    if best_model_path:
+        print(f"Loading best checkpoint: {best_model_path}")
+        best_model = SimMIM.load_from_checkpoint(
+            best_model_path,
+            config=config,
+            map_location="cpu"
+        )
+
+        backbone_path = f"checkpoints/pretrain/{config.MODEL.BACKBONE}/backbone_final.pth"
+        torch.save(best_model.encoder.state_dict(), backbone_path)
+        print(f"Saved backbone weights to: {backbone_path}")
+    else:
+        print("Warning: No best checkpoint found, using final model state")
+        backbone_path = f"checkpoints/pretrain/{config.MODEL.BACKBONE}/backbone_final.pth"
+        torch.save(model.encoder.state_dict(), backbone_path)
+        print(f"Saved to: {backbone_path}")
