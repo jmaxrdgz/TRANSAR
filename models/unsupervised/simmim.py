@@ -15,6 +15,7 @@ References:
 - TRANSAR paper: Uses block-wise masking with mask_size=8
 """
 
+import math
 import torch
 from torch import nn
 import torch.nn.functional as F
@@ -317,7 +318,7 @@ class SimMIM(L.LightningModule):
             else:
                 # Cosine annealing
                 progress = float(current_step - warmup) / float(max(1, total - warmup))
-                return 0.5 * (1.0 + torch.cos(torch.tensor(progress * torch.pi)))
+                return 0.5 * (1.0 + math.cos(progress * math.pi))
 
         scheduler = LambdaLR(optimizer, lr_lambda)
 
