@@ -28,15 +28,24 @@ class YOLODetector(L.LightningModule):
         self.save_hyperparameters(ignore=['config'])
         self.config = config
 
-        # Build backbone adapter
-        # Use 3 channels since we replicate single-channel SAR images to RGB
+        # Determine actual input channels for backbone
+        # If custom weights are provided, they expect IN_CHANS from config
+        backbone_in_chans = config.MODEL.IN_CHANS
+
+        # Build backbone adapter with correct input channels
         self.backbone_adapter = TimmBackboneAdapter(
             backbone_name=config.MODEL.BACKBONE.NAME,
             pretrained=config.MODEL.BACKBONE.PRETRAINED,
-            in_chans=3,  # RGB compatibility
+            in_chans=backbone_in_chans,  # Use config channels (1 for SAR)
             out_indices=(1, 2, 3),  # Use 3 scales for YOLO (P3, P4, P5)
             pretrained_weights_path=config.MODEL.BACKBONE.WEIGHTS,
         )
+
+        # If backbone expects 1 channel but we receive 3 (replicated), add conversion
+        self.needs_channel_conversion = (backbone_in_chans == 1)
+        if self.needs_channel_conversion:
+            # Simple conversion: take first channel (all 3 are identical after replication)
+            print("Note: Converting 3-channel input to 1-channel for backbone compatibility")
 
         # Get backbone output channels for selected scales
         backbone_out_channels = self.backbone_adapter.out_channels
@@ -81,6 +90,11 @@ class YOLODetector(L.LightningModule):
         # Convert list of images to batch tensor if needed
         if isinstance(images, list):
             images = torch.stack(images)
+
+        # Convert channels if needed (3 channels -> 1 channel for SAR backbones)
+        if self.needs_channel_conversion and images.shape[1] == 3:
+            # Take first channel (all 3 are identical after replication in data loader)
+            images = images[:, 0:1, :, :]
 
         # Forward through backbone
         features = self.backbone_adapter(images)
