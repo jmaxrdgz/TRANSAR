@@ -9,7 +9,7 @@ import argparse
 from pathlib import Path
 
 # Add project root to path
-project_root = Path(__file__).parent.parent
+project_root = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(project_root))
 
 import torch
@@ -18,8 +18,8 @@ from lightning.pytorch.callbacks import ModelCheckpoint, LearningRateMonitor
 from lightning.pytorch.loggers import TensorBoardLogger
 
 from utils.config import load_config
-from detection.models import FasterRCNNDetector
-from detection.data import create_detection_dataloaders
+from experiments.detection.models import FasterRCNNDetector
+from experiments.detection.data import create_detection_dataloaders
 
 
 def parse_args():
@@ -183,9 +183,9 @@ def main():
     # Parse arguments
     args = parse_args()
 
-    # Load config
+    # Load config (pass empty list to prevent load_config from parsing sys.argv)
     print(f"Loading config from: {args.config}")
-    config = load_config(args.config)
+    config = load_config(args.config, args=[])
 
     # Override with command-line arguments
     config = override_config(config, args)

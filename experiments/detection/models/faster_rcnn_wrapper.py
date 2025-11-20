@@ -8,13 +8,32 @@ import torch.nn as nn
 import lightning as L
 from torchvision.models.detection import FasterRCNN
 from torchvision.models.detection.rpn import AnchorGenerator
-from torchvision.models.detection.backbone_utils import BackboneWithFPN
 from torchvision.ops import MultiScaleRoIAlign
 from torchvision.ops import box_iou
 from typing import Dict, List, Optional, Tuple
+from collections import OrderedDict
 import numpy as np
 
 from .backbone_adapter import TimmBackboneAdapter
+
+
+class SimpleBackboneWrapper(nn.Module):
+    """
+    Simple wrapper that uses only the last layer from TimmBackboneAdapter.
+    """
+    def __init__(self, backbone_adapter: TimmBackboneAdapter):
+        super().__init__()
+        self.backbone = backbone_adapter
+
+        # Use only last feature layer
+        self.out_channels = backbone_adapter.out_channels[-1]
+
+    def forward(self, x):
+        # Get multi-scale features from backbone
+        features = self.backbone(x)
+
+        # Return only last feature level in FasterRCNN expected format
+        return OrderedDict([('0', features['3'])])
 
 
 class FasterRCNNDetector(L.LightningModule):
@@ -32,43 +51,38 @@ class FasterRCNNDetector(L.LightningModule):
         self.config = config
 
         # Build backbone adapter
+        # Note: Use 3 channels since we replicate single-channel SAR images to RGB
         self.backbone_adapter = TimmBackboneAdapter(
             backbone_name=config.MODEL.BACKBONE.NAME,
             pretrained=config.MODEL.BACKBONE.PRETRAINED,
-            in_chans=config.MODEL.IN_CHANS,
-            out_indices=(1, 2, 3, 4),  # Multi-scale features for FPN
+            in_chans=3,  # Always 3 channels for Faster R-CNN compatibility
+            out_indices=4,
             pretrained_weights_path=config.MODEL.BACKBONE.WEIGHTS,
         )
 
-        # Get output channels for FPN
-        backbone_out_channels = self.backbone_adapter.out_channels
-
-        # Create FPN
-        fpn = BackboneWithFPN(
-            backbone=self.backbone_adapter,
-            return_layers={str(i): str(i) for i in range(len(backbone_out_channels))},
-            in_channels_list=backbone_out_channels,
-            out_channels=256,  # FPN output channels
+        # Create simple backbone wrapper (uses only last layer)
+        backbone_wrapper = SimpleBackboneWrapper(
+            backbone_adapter=self.backbone_adapter
         )
 
-        # Create anchor generator
+        # Create anchor generator (single feature level)
         anchor_sizes = tuple(config.MODEL.RPN.ANCHOR_SIZES)
         aspect_ratios = tuple(config.MODEL.RPN.ASPECT_RATIOS)
         anchor_generator = AnchorGenerator(
-            sizes=tuple([anchor_sizes for _ in range(len(backbone_out_channels))]),
-            aspect_ratios=tuple([aspect_ratios for _ in range(len(backbone_out_channels))])
+            sizes=(anchor_sizes,),  # Single feature level
+            aspect_ratios=(aspect_ratios,)
         )
 
-        # Create ROI pooler
+        # Create ROI pooler (single feature level)
         roi_pooler = MultiScaleRoIAlign(
-            featmap_names=['0', '1', '2', '3'],
+            featmap_names=['0'],
             output_size=7,
             sampling_ratio=2
         )
 
         # Create Faster R-CNN model
         self.model = FasterRCNN(
-            backbone=fpn,
+            backbone=backbone_wrapper,
             num_classes=config.DATA.NUM_CLASSES,  # Including background
             rpn_anchor_generator=anchor_generator,
             box_roi_pool=roi_pooler,

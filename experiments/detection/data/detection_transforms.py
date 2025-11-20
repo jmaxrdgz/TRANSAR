@@ -3,8 +3,18 @@ Data transforms for object detection.
 Converts YOLO format to torchvision format for Faster R-CNN.
 """
 
+import sys
+from pathlib import Path
+
+# Ensure project root is in path
+project_root = Path(__file__).parent.parent.parent.parent.resolve()
+if str(project_root) not in sys.path:
+    sys.path.insert(0, str(project_root))
+
 import torch
+import torchvision.transforms.functional as TF
 from typing import Dict, List, Tuple
+from PIL import Image
 
 
 def yolo_to_torchvision_format(
@@ -61,7 +71,7 @@ def yolo_to_torchvision_format(
     }
 
 
-def detection_collate_fn(batch: List[Dict]) -> Dict:
+def detection_collate_fn(batch: List[Dict], target_size: int = 256) -> Dict:
     """
     Custom collate function for object detection.
     Converts batches from YOLO dataset format to torchvision Faster R-CNN format.
@@ -73,6 +83,7 @@ def detection_collate_fn(batch: List[Dict]) -> Dict:
             - 'labels': Tensor [N]
             - 'image_id': int
             - 'orig_size': Tensor [H, W]
+        target_size: Target image size for resizing (from config)
 
     Returns:
         Dict with:
@@ -88,7 +99,20 @@ def detection_collate_fn(batch: List[Dict]) -> Dict:
         labels = sample['labels']
         image_id = sample['image_id']
 
-        # Get image size (H, W)
+        # Convert PIL Image to tensor if needed
+        if isinstance(image, Image.Image):
+            # Resize to target size
+            image = TF.resize(image, [target_size, target_size])
+            image = TF.to_tensor(image)
+        else:
+            # Already a tensor, resize it
+            image = TF.resize(image, [target_size, target_size])
+
+        # Replicate single channel to 3 channels for Faster R-CNN (expects RGB)
+        if image.shape[0] == 1:
+            image = image.repeat(3, 1, 1)
+
+        # Get image size (H, W) after resizing
         _, h, w = image.shape
         image_size = (h, w)
 
@@ -118,6 +142,7 @@ def create_detection_dataloaders(config):
     from torch.utils.data import DataLoader
     from data.data_finetune import SARDetYoloDataset, SARNormalization
     from torchvision import transforms as T
+    from functools import partial
 
     # Build transforms
     train_transforms = []
@@ -169,15 +194,18 @@ def create_detection_dataloaders(config):
         transform=val_transform
     )
 
+    # Create collate function with target size from config
+    collate_fn_with_size = partial(detection_collate_fn, target_size=config.MODEL.IN_SIZE)
+
     # Create dataloaders with detection collate function
     train_dataloader = DataLoader(
         train_dataset,
         batch_size=config.TRAIN.BATCH_SIZE,
         shuffle=True,
         num_workers=config.TRAIN.NUM_WORKERS,
-        collate_fn=detection_collate_fn,
+        collate_fn=collate_fn_with_size,
         pin_memory=True,
-        persistent_workers=True if config.TRAIN.NUM_WORKERS > 0 else False
+        persistent_workers=False  # Disabled to avoid caching issues during development
     )
 
     val_dataloader = DataLoader(
@@ -185,9 +213,9 @@ def create_detection_dataloaders(config):
         batch_size=config.TRAIN.BATCH_SIZE,
         shuffle=False,
         num_workers=config.TRAIN.NUM_WORKERS,
-        collate_fn=detection_collate_fn,
+        collate_fn=collate_fn_with_size,
         pin_memory=True,
-        persistent_workers=True if config.TRAIN.NUM_WORKERS > 0 else False
+        persistent_workers=False  # Disabled to avoid caching issues during development
     )
 
     return train_dataloader, val_dataloader

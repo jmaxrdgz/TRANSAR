@@ -21,7 +21,7 @@ class TimmBackboneAdapter(nn.Module):
         backbone_name: str,
         pretrained: bool = True,
         in_chans: int = 1,
-        out_indices: tuple = (1, 2, 3, 4),
+        out_indices: tuple = (0, 1, 2, 3),
         pretrained_weights_path: str = None
     ):
         """
@@ -146,7 +146,7 @@ def build_detection_backbone(
     backbone_name: str,
     pretrained: bool = True,
     in_chans: int = 1,
-    out_indices: tuple = (1, 2, 3, 4),
+    out_indices: tuple = (0, 1, 2, 3),
     pretrained_weights_path: str = None,
     num_blocks_to_unfreeze: int = 0
 ) -> TimmBackboneAdapter:
