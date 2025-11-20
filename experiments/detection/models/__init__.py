@@ -1,12 +1,15 @@
 """
-Detection models for Faster R-CNN experiments.
+Detection models for YOLO experiments.
 """
 
 from .backbone_adapter import TimmBackboneAdapter, build_detection_backbone
-from .faster_rcnn_wrapper import FasterRCNNDetector
+from .yolo_wrapper import YOLODetector
+from .yolo_head import YOLODetectionHead, build_yolo_head
 
 __all__ = [
     'TimmBackboneAdapter',
     'build_detection_backbone',
-    'FasterRCNNDetector',
+    'YOLODetector',
+    'YOLODetectionHead',
+    'build_yolo_head',
 ]

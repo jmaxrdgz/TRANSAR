@@ -75,7 +75,8 @@ class TimmBackboneAdapter(nn.Module):
     @property
     def out_channels(self) -> List[int]:
         """Return number of output channels for each feature level."""
-        return [self.feature_info[i]['num_chs'] for i in range(len(self.out_indices))]
+        # feature_info is already filtered by out_indices from timm
+        return [info['num_chs'] for info in self.feature_info]
 
     def forward(self, x: torch.Tensor) -> Dict[str, torch.Tensor]:
         """

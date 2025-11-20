@@ -1,44 +1,22 @@
 """
-Lightning wrapper for Faster R-CNN with custom backbones.
-Supports multi-scale detection with FPN and configurable backbones.
+Lightning wrapper for YOLO detector with custom backbones.
+Supports multi-scale detection with custom backbones via TimmBackboneAdapter.
 """
 
 import torch
 import torch.nn as nn
 import lightning as L
-from torchvision.models.detection import FasterRCNN
-from torchvision.models.detection.rpn import AnchorGenerator
-from torchvision.ops import MultiScaleRoIAlign
-from torchvision.ops import box_iou
+from torchvision.ops import box_iou, box_convert
 from typing import Dict, List, Optional, Tuple
-from collections import OrderedDict
 import numpy as np
 
 from .backbone_adapter import TimmBackboneAdapter
+from .yolo_head import build_yolo_head
 
 
-class SimpleBackboneWrapper(nn.Module):
+class YOLODetector(L.LightningModule):
     """
-    Simple wrapper that uses only the last layer from TimmBackboneAdapter.
-    """
-    def __init__(self, backbone_adapter: TimmBackboneAdapter):
-        super().__init__()
-        self.backbone = backbone_adapter
-
-        # Use only last feature layer
-        self.out_channels = backbone_adapter.out_channels[-1]
-
-    def forward(self, x):
-        # Get multi-scale features from backbone
-        features = self.backbone(x)
-
-        # Return only last feature level in FasterRCNN expected format
-        return OrderedDict([('0', features['3'])])
-
-
-class FasterRCNNDetector(L.LightningModule):
-    """
-    Lightning module wrapping Faster R-CNN with custom backbones for object detection.
+    Lightning module wrapping YOLO with custom backbones for object detection.
     """
 
     def __init__(self, config):
@@ -51,58 +29,38 @@ class FasterRCNNDetector(L.LightningModule):
         self.config = config
 
         # Build backbone adapter
-        # Note: Use 3 channels since we replicate single-channel SAR images to RGB
+        # Use 3 channels since we replicate single-channel SAR images to RGB
         self.backbone_adapter = TimmBackboneAdapter(
             backbone_name=config.MODEL.BACKBONE.NAME,
             pretrained=config.MODEL.BACKBONE.PRETRAINED,
-            in_chans=3,  # Always 3 channels for Faster R-CNN compatibility
-            out_indices=4,
+            in_chans=3,  # RGB compatibility
+            out_indices=(1, 2, 3),  # Use 3 scales for YOLO (P3, P4, P5)
             pretrained_weights_path=config.MODEL.BACKBONE.WEIGHTS,
         )
 
-        # Create simple backbone wrapper (uses only last layer)
-        backbone_wrapper = SimpleBackboneWrapper(
-            backbone_adapter=self.backbone_adapter
-        )
+        # Get backbone output channels for selected scales
+        backbone_out_channels = self.backbone_adapter.out_channels
 
-        # Create anchor generator (single feature level)
-        anchor_sizes = tuple(config.MODEL.RPN.ANCHOR_SIZES)
-        aspect_ratios = tuple(config.MODEL.RPN.ASPECT_RATIOS)
-        anchor_generator = AnchorGenerator(
-            sizes=(anchor_sizes,),  # Single feature level
-            aspect_ratios=(aspect_ratios,)
-        )
-
-        # Create ROI pooler (single feature level)
-        roi_pooler = MultiScaleRoIAlign(
-            featmap_names=['0'],
-            output_size=7,
-            sampling_ratio=2
-        )
-
-        # Create Faster R-CNN model
-        self.model = FasterRCNN(
-            backbone=backbone_wrapper,
-            num_classes=config.DATA.NUM_CLASSES,  # Including background
-            rpn_anchor_generator=anchor_generator,
-            box_roi_pool=roi_pooler,
-            # RPN parameters
-            rpn_pre_nms_top_n_train=config.MODEL.RPN.PRE_NMS_TOP_N_TRAIN,
-            rpn_pre_nms_top_n_test=config.MODEL.RPN.PRE_NMS_TOP_N_TEST,
-            rpn_post_nms_top_n_train=config.MODEL.RPN.POST_NMS_TOP_N_TRAIN,
-            rpn_post_nms_top_n_test=config.MODEL.RPN.POST_NMS_TOP_N_TEST,
-            rpn_nms_thresh=config.MODEL.RPN.NMS_THRESH,
-            rpn_fg_iou_thresh=config.MODEL.RPN.FG_IOU_THRESH,
-            rpn_bg_iou_thresh=config.MODEL.RPN.BG_IOU_THRESH,
-            # Box parameters
-            box_score_thresh=config.MODEL.BOX_SCORE_THRESH,
-            box_nms_thresh=config.MODEL.BOX_NMS_THRESH,
-            box_detections_per_img=config.MODEL.BOX_DETECTIONS_PER_IMG,
+        # Build YOLO detection head
+        self.detection_head = build_yolo_head(
+            in_channels=backbone_out_channels,
+            num_classes=config.DATA.NUM_CLASSES - 1,  # Exclude background
+            anchors=config.MODEL.ANCHORS if hasattr(config.MODEL, 'ANCHORS') else None,
+            strides=config.MODEL.STRIDES if hasattr(config.MODEL, 'STRIDES') else [8, 16, 32]
         )
 
         # Apply backbone freezing
         if hasattr(config.MODEL, 'NUM_BLOCKS_TO_UNFREEZE'):
             self.freeze_backbone(config.MODEL.NUM_BLOCKS_TO_UNFREEZE)
+
+        # Loss weights
+        self.box_loss_weight = config.MODEL.LOSS_WEIGHTS.BOX if hasattr(config.MODEL, 'LOSS_WEIGHTS') else 0.05
+        self.obj_loss_weight = config.MODEL.LOSS_WEIGHTS.OBJ if hasattr(config.MODEL, 'LOSS_WEIGHTS') else 1.0
+        self.cls_loss_weight = config.MODEL.LOSS_WEIGHTS.CLS if hasattr(config.MODEL, 'LOSS_WEIGHTS') else 0.5
+
+        # Confidence threshold for inference
+        self.conf_threshold = config.MODEL.CONF_THRESHOLD if hasattr(config.MODEL, 'CONF_THRESHOLD') else 0.25
+        self.nms_threshold = config.MODEL.NMS_THRESHOLD if hasattr(config.MODEL, 'NMS_THRESHOLD') else 0.45
 
         # Validation metrics storage
         self.val_predictions = []
@@ -113,21 +71,188 @@ class FasterRCNNDetector(L.LightningModule):
         Forward pass.
 
         Args:
-            images: List of tensors or tensor [B, C, H, W]
+            images: List of tensors [C, H, W] or tensor [B, C, H, W]
             targets: List of dicts with 'boxes' and 'labels' (training only)
 
         Returns:
             During training: dict of losses
             During eval: list of predictions
         """
-        return self.model(images, targets)
+        # Convert list of images to batch tensor if needed
+        if isinstance(images, list):
+            images = torch.stack(images)
+
+        # Forward through backbone
+        features = self.backbone_adapter(images)
+
+        # Convert OrderedDict to list (in order)
+        features_list = [features[str(i)] for i in range(len(features))]
+
+        # Forward through YOLO head
+        predictions = self.detection_head(features_list)
+
+        if self.training and targets is not None:
+            # Compute losses
+            losses = self.compute_loss(predictions, targets, images.shape[-2:])
+            return losses
+        else:
+            # Decode predictions for inference
+            detections = self.detection_head.decode_predictions(
+                predictions,
+                conf_threshold=self.conf_threshold,
+                nms_threshold=self.nms_threshold
+            )
+            return detections
+
+    def compute_loss(self, predictions: List[torch.Tensor], targets: List[Dict], image_size: Tuple[int, int]) -> Dict[str, torch.Tensor]:
+        """
+        Compute YOLO loss (box, objectness, classification).
+
+        Args:
+            predictions: List of raw predictions from YOLO head
+            targets: List of target dicts with 'boxes', 'labels'
+            image_size: (H, W) of input images
+
+        Returns:
+            Dict with loss components
+        """
+        device = predictions[0].device
+        batch_size = predictions[0].shape[0]
+
+        total_box_loss = 0.0
+        total_obj_loss = 0.0
+        total_cls_loss = 0.0
+
+        # Build target tensors for each scale
+        for scale_idx, pred in enumerate(predictions):
+            stride = self.detection_head.strides[scale_idx]
+            anchors = self.detection_head.anchors[scale_idx]
+
+            # Get grid size
+            _, num_anchors, grid_h, grid_w, num_outputs = pred.shape
+
+            # Create target tensors
+            target_boxes = torch.zeros((batch_size, num_anchors, grid_h, grid_w, 4), device=device)
+            target_obj = torch.zeros((batch_size, num_anchors, grid_h, grid_w), device=device)
+            target_cls = torch.zeros((batch_size, num_anchors, grid_h, grid_w, self.detection_head.num_classes), device=device)
+
+            # Process each image in batch
+            for batch_idx in range(batch_size):
+                if len(targets[batch_idx]['boxes']) == 0:
+                    continue
+
+                gt_boxes = targets[batch_idx]['boxes']  # [N, 4] in (x1, y1, x2, y2)
+                gt_labels = targets[batch_idx]['labels'] - 1  # Convert to 0-indexed (remove background)
+
+                # Convert boxes to center format
+                gt_boxes_cxcywh = box_convert(gt_boxes, 'xyxy', 'cxcywh')
+
+                # Assign targets to grid cells and anchors
+                for gt_idx in range(len(gt_boxes)):
+                    gt_box = gt_boxes_cxcywh[gt_idx]
+                    gt_label = gt_labels[gt_idx]
+
+                    # Get grid cell
+                    cx, cy, w, h = gt_box
+                    grid_x = int(cx / stride)
+                    grid_y = int(cy / stride)
+
+                    # Clip to grid bounds
+                    grid_x = max(0, min(grid_x, grid_w - 1))
+                    grid_y = max(0, min(grid_y, grid_h - 1))
+
+                    # Normalize box to grid scale
+                    cx_grid = cx / stride
+                    cy_grid = cy / stride
+                    w_grid = w / stride
+                    h_grid = h / stride
+
+                    # Find best matching anchor
+                    gt_wh = torch.tensor([w_grid, h_grid], device=device)
+                    anchor_ious = torch.min(gt_wh / (anchors + 1e-9), anchors / (gt_wh + 1e-9)).min(dim=1)[0]
+                    best_anchor_idx = anchor_ious.argmax()
+
+                    # Assign target
+                    target_obj[batch_idx, best_anchor_idx, grid_y, grid_x] = 1.0
+
+                    # Box target (offset from grid cell)
+                    target_boxes[batch_idx, best_anchor_idx, grid_y, grid_x, 0] = cx_grid - grid_x
+                    target_boxes[batch_idx, best_anchor_idx, grid_y, grid_x, 1] = cy_grid - grid_y
+                    target_boxes[batch_idx, best_anchor_idx, grid_y, grid_x, 2] = torch.log(w_grid / (anchors[best_anchor_idx, 0] + 1e-9) + 1e-9)
+                    target_boxes[batch_idx, best_anchor_idx, grid_y, grid_x, 3] = torch.log(h_grid / (anchors[best_anchor_idx, 1] + 1e-9) + 1e-9)
+
+                    # Class target (one-hot)
+                    target_cls[batch_idx, best_anchor_idx, grid_y, grid_x, gt_label] = 1.0
+
+            # Parse predictions
+            pred_xy = pred[..., 0:2]
+            pred_wh = pred[..., 2:4]
+            pred_obj = pred[..., 4]
+            pred_cls = pred[..., 5:]
+
+            # Compute objectness loss (BCE)
+            obj_loss = nn.functional.binary_cross_entropy_with_logits(
+                pred_obj,
+                target_obj,
+                reduction='mean'
+            )
+
+            # Only compute box and class loss for positive samples
+            pos_mask = target_obj > 0.5
+
+            if pos_mask.sum() > 0:
+                # Box loss (MSE on offset)
+                box_loss = nn.functional.mse_loss(
+                    pred_xy[pos_mask],
+                    target_boxes[..., 0:2][pos_mask],
+                    reduction='mean'
+                ) + nn.functional.mse_loss(
+                    pred_wh[pos_mask],
+                    target_boxes[..., 2:4][pos_mask],
+                    reduction='mean'
+                )
+
+                # Class loss (BCE)
+                cls_loss = nn.functional.binary_cross_entropy_with_logits(
+                    pred_cls[pos_mask],
+                    target_cls[pos_mask],
+                    reduction='mean'
+                )
+            else:
+                box_loss = torch.tensor(0.0, device=device)
+                cls_loss = torch.tensor(0.0, device=device)
+
+            # Accumulate losses
+            total_box_loss += box_loss
+            total_obj_loss += obj_loss
+            total_cls_loss += cls_loss
+
+        # Average over scales
+        num_scales = len(predictions)
+        total_box_loss /= num_scales
+        total_obj_loss /= num_scales
+        total_cls_loss /= num_scales
+
+        # Weighted total loss
+        total_loss = (
+            self.box_loss_weight * total_box_loss +
+            self.obj_loss_weight * total_obj_loss +
+            self.cls_loss_weight * total_cls_loss
+        )
+
+        return {
+            'loss': total_loss,
+            'box_loss': total_box_loss,
+            'obj_loss': total_obj_loss,
+            'cls_loss': total_cls_loss
+        }
 
     def training_step(self, batch, batch_idx):
         """
         Training step.
 
         Args:
-            batch: Dict with 'images' (list of tensors) and 'targets' (list of dicts)
+            batch: Dict with 'images' and 'targets'
             batch_idx: Batch index
 
         Returns:
@@ -137,19 +262,15 @@ class FasterRCNNDetector(L.LightningModule):
         targets = batch['targets']
 
         # Forward pass - returns loss dict during training
-        loss_dict = self.model(images, targets)
+        loss_dict = self(images, targets)
 
-        # Sum all losses
-        losses = sum(loss for loss in loss_dict.values())
+        # Log losses
+        self.log('train/loss', loss_dict['loss'], prog_bar=True, on_step=True, on_epoch=True)
+        self.log('train/box_loss', loss_dict['box_loss'], on_step=True, on_epoch=True)
+        self.log('train/obj_loss', loss_dict['obj_loss'], on_step=True, on_epoch=True)
+        self.log('train/cls_loss', loss_dict['cls_loss'], on_step=True, on_epoch=True)
 
-        # Log individual losses
-        self.log('train/loss', losses, prog_bar=True, on_step=True, on_epoch=True)
-        self.log('train/loss_classifier', loss_dict['loss_classifier'], on_step=True, on_epoch=True)
-        self.log('train/loss_box_reg', loss_dict['loss_box_reg'], on_step=True, on_epoch=True)
-        self.log('train/loss_objectness', loss_dict['loss_objectness'], on_step=True, on_epoch=True)
-        self.log('train/loss_rpn_box_reg', loss_dict['loss_rpn_box_reg'], on_step=True, on_epoch=True)
-
-        return losses
+        return loss_dict['loss']
 
     def validation_step(self, batch, batch_idx):
         """
@@ -163,9 +284,8 @@ class FasterRCNNDetector(L.LightningModule):
         targets = batch['targets']
 
         # Forward pass - returns predictions during eval
-        self.model.eval()
         with torch.no_grad():
-            predictions = self.model(images)
+            predictions = self(images)
 
         # Store for epoch-end metric computation
         self.val_predictions.extend(predictions)
@@ -188,7 +308,7 @@ class FasterRCNNDetector(L.LightningModule):
         f1_score, precision, recall = self._compute_f1(
             self.val_predictions,
             self.val_targets,
-            iou_threshold=0.5  # Standard IoU threshold for F1
+            iou_threshold=0.5
         )
 
         # Log metrics
@@ -211,14 +331,7 @@ class FasterRCNNDetector(L.LightningModule):
     ) -> Tuple[float, float, float]:
         """
         Compute F1 score, precision, and recall.
-
-        Args:
-            predictions: List of prediction dicts with 'boxes', 'labels', 'scores'
-            targets: List of target dicts with 'boxes', 'labels'
-            iou_threshold: IoU threshold for matching predictions to ground truth
-
-        Returns:
-            (F1 score, precision, recall)
+        Reused from FasterRCNNDetector for consistency.
         """
         total_tp = 0
         total_fp = 0
@@ -233,44 +346,32 @@ class FasterRCNNDetector(L.LightningModule):
             if len(gt_boxes) == 0 and len(pred_boxes) == 0:
                 continue
             elif len(gt_boxes) == 0:
-                # All predictions are false positives
                 total_fp += len(pred_boxes)
                 continue
             elif len(pred_boxes) == 0:
-                # All ground truths are false negatives
                 total_fn += len(gt_boxes)
                 continue
 
             # Compute IoU matrix
-            iou_matrix = box_iou(pred_boxes, gt_boxes)  # [num_pred, num_gt]
+            iou_matrix = box_iou(pred_boxes, gt_boxes)
 
             # Track which GT boxes have been matched
             gt_matched = torch.zeros(len(gt_boxes), dtype=torch.bool, device=gt_boxes.device)
 
             # For each prediction, find best matching GT
             for pred_idx in range(len(pred_boxes)):
-                if len(gt_boxes) == 0:
-                    total_fp += 1
-                    continue
-
-                # Get IoUs for this prediction
                 ious = iou_matrix[pred_idx]
                 max_iou, max_idx = ious.max(dim=0)
 
-                # Check if labels match (class-aware matching)
                 if max_iou >= iou_threshold and pred_labels[pred_idx] == gt_labels[max_idx]:
                     if not gt_matched[max_idx]:
-                        # True positive
                         total_tp += 1
                         gt_matched[max_idx] = True
                     else:
-                        # Already matched, this is a false positive
                         total_fp += 1
                 else:
-                    # No good match, false positive
                     total_fp += 1
 
-            # Unmatched GT boxes are false negatives
             total_fn += (~gt_matched).sum().item()
 
         # Compute metrics
@@ -288,14 +389,7 @@ class FasterRCNNDetector(L.LightningModule):
     ) -> Tuple[float, float, float]:
         """
         Compute mean Average Precision (mAP) at different IoU thresholds.
-
-        Args:
-            predictions: List of prediction dicts with 'boxes', 'labels', 'scores'
-            targets: List of target dicts with 'boxes', 'labels'
-            iou_thresholds: IoU thresholds for mAP computation
-
-        Returns:
-            (mAP@0.5, mAP@0.75, mAP@0.5:0.95)
+        Reused from FasterRCNNDetector for consistency.
         """
         if iou_thresholds is None:
             iou_thresholds = [0.5, 0.55, 0.6, 0.65, 0.7, 0.75, 0.8, 0.85, 0.9, 0.95]
@@ -356,11 +450,9 @@ class FasterRCNNDetector(L.LightningModule):
                                 break
 
                             if len(gt_boxes_img) > 0:
-                                # Compute IoU with all GT boxes
                                 ious = box_iou(pred_boxes_flat[box_idx:box_idx+1], gt_boxes_img)[0]
                                 max_iou, max_idx = ious.max(dim=0)
 
-                                # Check if match
                                 if max_iou >= iou_thresh and not gt_matched[max_idx]:
                                     tp[box_idx] = 1
                                     gt_matched[max_idx] = True
@@ -375,7 +467,6 @@ class FasterRCNNDetector(L.LightningModule):
                     tp_cumsum = torch.cumsum(tp, dim=0)
                     fp_cumsum = torch.cumsum(fp, dim=0)
 
-                    # Count total GT boxes for this class
                     total_gt = sum(len(gt_boxes) for gt_boxes in all_gt_boxes)
 
                     if total_gt > 0:
@@ -403,15 +494,7 @@ class FasterRCNNDetector(L.LightningModule):
     def _compute_ap(recalls: np.ndarray, precisions: np.ndarray) -> float:
         """
         Compute Average Precision using 11-point interpolation.
-
-        Args:
-            recalls: Array of recall values
-            precisions: Array of precision values
-
-        Returns:
-            Average Precision score
         """
-        # 11-point interpolation
         ap = 0.0
         for t in np.linspace(0, 1, 11):
             mask = recalls >= t
@@ -462,7 +545,6 @@ class FasterRCNNDetector(L.LightningModule):
             num_blocks: Number of blocks to unfreeze (None = unfreeze all)
         """
         if num_blocks is None:
-            # Unfreeze all
             for param in self.backbone_adapter.parameters():
                 param.requires_grad = True
             print("Unfroze entire backbone")

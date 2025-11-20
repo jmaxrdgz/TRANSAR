@@ -1,5 +1,5 @@
 """
-Finetuning pipeline for object detection using Faster R-CNN with custom backbones.
+Finetuning pipeline for object detection using YOLO with custom backbones.
 Tests detection capability of different backbone architectures.
 """
 
@@ -18,14 +18,14 @@ from lightning.pytorch.callbacks import ModelCheckpoint, LearningRateMonitor
 from lightning.pytorch.loggers import TensorBoardLogger
 
 from utils.config import load_config
-from experiments.detection.models import FasterRCNNDetector
+from experiments.detection.models import YOLODetector
 from experiments.detection.data import create_detection_dataloaders
 
 
 def parse_args():
     """Parse command-line arguments."""
     parser = argparse.ArgumentParser(
-        description='Finetune Faster R-CNN for object detection on SAR images'
+        description='Finetune YOLO for object detection on SAR images'
     )
 
     # Config and experiment
@@ -217,7 +217,7 @@ def main():
 
     # Create model
     print(f"\nCreating model: {config.MODEL.NAME}")
-    model = FasterRCNNDetector(config)
+    model = YOLODetector(config)
 
     # Count parameters
     total_params = sum(p.numel() for p in model.parameters())

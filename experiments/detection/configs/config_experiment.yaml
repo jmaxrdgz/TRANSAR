@@ -1,10 +1,10 @@
 # config_experiment.yaml
-# Configuration for Faster R-CNN detection experiments with multiple backbones
+# Configuration for YOLO detection experiments with multiple backbones
 
 SEED: 42
 
 MODEL:
-  NAME: FasterRCNN
+  NAME: YOLO
   IN_SIZE: 256
   IN_CHANS: 1  # SAR images are single-channel
 
@@ -16,22 +16,27 @@ MODEL:
   # Progressive unfreezing
   NUM_BLOCKS_TO_UNFREEZE: 0  # 0 = freeze entire backbone, 1-4 = unfreeze last N blocks
 
-  # RPN (Region Proposal Network) parameters
-  RPN:
-    ANCHOR_SIZES: [32, 64, 128, 256, 512]  # Anchor sizes for different scales
-    ASPECT_RATIOS: [0.5, 1.0, 2.0]  # Anchor aspect ratios
-    PRE_NMS_TOP_N_TRAIN: 2000  # Top N proposals before NMS (training)
-    PRE_NMS_TOP_N_TEST: 1000  # Top N proposals before NMS (test)
-    POST_NMS_TOP_N_TRAIN: 2000  # Top N proposals after NMS (training)
-    POST_NMS_TOP_N_TEST: 1000  # Top N proposals after NMS (test)
-    NMS_THRESH: 0.7  # NMS IoU threshold for RPN
-    FG_IOU_THRESH: 0.7  # IoU threshold for positive anchors
-    BG_IOU_THRESH: 0.3  # IoU threshold for negative anchors
+  # YOLO detection parameters
+  STRIDES: [8, 16, 32]  # Feature strides for P3, P4, P5
 
-  # Box prediction parameters
-  BOX_SCORE_THRESH: 0.05  # Minimum score for detections
-  BOX_NMS_THRESH: 0.5  # NMS IoU threshold for final detections
-  BOX_DETECTIONS_PER_IMG: 100  # Maximum number of detections per image
+  # Anchor boxes for each scale (in pixel space)
+  # Format: [scale1_anchors, scale2_anchors, scale3_anchors]
+  # Each scale has 3 anchors: [(w1,h1), (w2,h2), (w3,h3)]
+  ANCHORS:
+    - [[10, 13], [16, 30], [33, 23]]      # P3/8
+    - [[30, 61], [62, 45], [59, 119]]     # P4/16
+    - [[116, 90], [156, 198], [373, 326]]  # P5/32
+
+  # Loss weights
+  LOSS_WEIGHTS:
+    BOX: 0.05   # Box regression loss weight
+    OBJ: 1.0    # Objectness loss weight
+    CLS: 0.5    # Classification loss weight
+
+  # Inference parameters
+  CONF_THRESHOLD: 0.25  # Confidence threshold for detections
+  NMS_THRESHOLD: 0.45   # NMS IoU threshold
+  MAX_DETECTIONS: 300   # Maximum number of detections per image
 
 DATA:
   DATA_PATH: dataset/supervised/synthetic_yolo
@@ -51,7 +56,7 @@ TRAIN:
   GPUS: 2
   NUM_WORKERS: 4
   EPOCHS: 50
-  BATCH_SIZE: 4  # Smaller batch size for Faster R-CNN (memory intensive)
+  BATCH_SIZE: 8
   LR: 0.0001
   WEIGHT_DECAY: 0.0001
   LOG_FREQ: 10
