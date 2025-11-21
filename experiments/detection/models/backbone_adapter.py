@@ -21,7 +21,7 @@ class TimmBackboneAdapter(nn.Module):
         backbone_name: str,
         pretrained: bool = True,
         in_chans: int = 1,
-        out_indices: tuple = (0, 1, 2, 3),
+        out_indices: tuple = 4,
         pretrained_weights_path: str = None
     ):
         """
@@ -34,7 +34,8 @@ class TimmBackboneAdapter(nn.Module):
         """
         super().__init__()
 
-        self.out_indices = out_indices
+        # Store out_indices for channel filtering
+        self.out_indices = out_indices if isinstance(out_indices, (list, tuple)) else (out_indices,)
 
         # Create timm model with feature extraction
         self.backbone = timm.create_model(
@@ -75,8 +76,13 @@ class TimmBackboneAdapter(nn.Module):
     @property
     def out_channels(self) -> List[int]:
         """Return number of output channels for each feature level."""
-        # feature_info is already filtered by out_indices from timm
-        return [info['num_chs'] for info in self.feature_info]
+        # timm's feature_info contains all stages; filter by out_indices
+        if len(self.feature_info) == len(self.out_indices):
+            # Already filtered by timm
+            return [info['num_chs'] for info in self.feature_info]
+        else:
+            # Manually filter to match out_indices
+            return [self.feature_info[i]['num_chs'] for i in self.out_indices]
 
     def forward(self, x: torch.Tensor) -> Dict[str, torch.Tensor]:
         """
@@ -94,6 +100,15 @@ class TimmBackboneAdapter(nn.Module):
         # Convert to OrderedDict with string keys as expected by torchvision
         out = OrderedDict()
         for idx, feat in enumerate(features):
+            # Some models (like Swin) output NHWC format, convert to NCHW if needed
+            # Map enumeration index to actual stage index from out_indices
+            stage_idx = self.out_indices[idx] if idx < len(self.out_indices) else idx
+            expected_channels = self.feature_info[stage_idx]['num_chs']
+
+            if feat.dim() == 4 and feat.shape[-1] == expected_channels and feat.shape[1] != expected_channels:
+                # NHWC format [B, H, W, C], convert to NCHW [B, C, H, W]
+                feat = feat.permute(0, 3, 1, 2).contiguous()
+
             # Name features as '0', '1', '2', '3' corresponding to different scales
             out[str(idx)] = feat
 

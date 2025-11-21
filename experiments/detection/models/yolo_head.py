@@ -41,12 +41,10 @@ class YOLODetectionHead(nn.Module):
 
         # Register anchors as buffers (not parameters)
         # Normalize anchors by stride for each scale
-        self.anchors = []
         for scale_idx, (scale_anchors, stride) in enumerate(zip(anchors, strides)):
             # Anchors are in pixel space, normalize by stride
             anchor_tensor = torch.tensor(scale_anchors, dtype=torch.float32) / stride
             self.register_buffer(f'anchors_{scale_idx}', anchor_tensor)
-            self.anchors.append(anchor_tensor)
 
         # Create detection heads for each scale
         self.detection_heads = nn.ModuleList([
@@ -140,7 +138,7 @@ class YOLODetectionHead(nn.Module):
 
                 H, W = pred_img.shape[1:3]
                 stride = self.strides[scale_idx]
-                anchors = self.anchors[scale_idx]  # [num_anchors_per_scale, 2]
+                anchors = getattr(self, f'anchors_{scale_idx}')  # [num_anchors_per_scale, 2]
 
                 # Create grid
                 grid_y, grid_x = torch.meshgrid(

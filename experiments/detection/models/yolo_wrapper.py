@@ -14,6 +14,39 @@ from .backbone_adapter import TimmBackboneAdapter
 from .yolo_head import build_yolo_head
 
 
+class FeatureAdapter(nn.Module):
+    """
+    Adapter to convert backbone features to YOLO-compatible channels.
+    Uses 1x1 convolutions to adjust channel dimensions.
+    """
+
+    def __init__(self, in_channels: List[int], out_channels: List[int]):
+        """
+        Args:
+            in_channels: List of input channel counts from backbone
+            out_channels: List of desired output channel counts for YOLO
+        """
+        super().__init__()
+
+        self.adapters = nn.ModuleList([
+            nn.Conv2d(in_ch, out_ch, kernel_size=1, stride=1, padding=0)
+            if in_ch != out_ch else nn.Identity()
+            for in_ch, out_ch in zip(in_channels, out_channels)
+        ])
+
+    def forward(self, features: List[torch.Tensor]) -> List[torch.Tensor]:
+        """
+        Adapt feature channels.
+
+        Args:
+            features: List of feature tensors from backbone
+
+        Returns:
+            List of adapted feature tensors
+        """
+        return [adapter(feat) for adapter, feat in zip(self.adapters, features)]
+
+
 class YOLODetector(L.LightningModule):
     """
     Lightning module wrapping YOLO with custom backbones for object detection.
@@ -33,11 +66,12 @@ class YOLODetector(L.LightningModule):
         backbone_in_chans = config.MODEL.IN_CHANS
 
         # Build backbone adapter with correct input channels
+        # Use only the last feature level (index 3 = 4th level, deepest features)
         self.backbone_adapter = TimmBackboneAdapter(
             backbone_name=config.MODEL.BACKBONE.NAME,
             pretrained=config.MODEL.BACKBONE.PRETRAINED,
             in_chans=backbone_in_chans,  # Use config channels (1 for SAR)
-            out_indices=(1, 2, 3),  # Use 3 scales for YOLO (P3, P4, P5)
+            out_indices=(3,),  # Only use last feature level
             pretrained_weights_path=config.MODEL.BACKBONE.WEIGHTS,
         )
 
@@ -47,15 +81,21 @@ class YOLODetector(L.LightningModule):
             # Simple conversion: take first channel (all 3 are identical after replication)
             print("Note: Converting 3-channel input to 1-channel for backbone compatibility")
 
-        # Get backbone output channels for selected scales
+        # Get backbone output channels for last feature level
         backbone_out_channels = self.backbone_adapter.out_channels
+        print(f"Backbone output channels (last feature only): {backbone_out_channels}")
 
-        # Build YOLO detection head
+        # Single-scale YOLO detection head
+        # Anchors and strides should be configured for single scale in config
+        anchors = config.MODEL.ANCHORS if hasattr(config.MODEL, 'ANCHORS') else [[(116, 90), (156, 198), (373, 326)]]
+        strides = config.MODEL.STRIDES if hasattr(config.MODEL, 'STRIDES') else [32]
+
+        # Build YOLO detection head for single scale
         self.detection_head = build_yolo_head(
-            in_channels=backbone_out_channels,
+            in_channels=backbone_out_channels,  # List with single element
             num_classes=config.DATA.NUM_CLASSES - 1,  # Exclude background
-            anchors=config.MODEL.ANCHORS if hasattr(config.MODEL, 'ANCHORS') else None,
-            strides=config.MODEL.STRIDES if hasattr(config.MODEL, 'STRIDES') else [8, 16, 32]
+            anchors=anchors,
+            strides=strides
         )
 
         # Apply backbone freezing
@@ -140,7 +180,7 @@ class YOLODetector(L.LightningModule):
         # Build target tensors for each scale
         for scale_idx, pred in enumerate(predictions):
             stride = self.detection_head.strides[scale_idx]
-            anchors = self.detection_head.anchors[scale_idx]
+            anchors = getattr(self.detection_head, f'anchors_{scale_idx}')
 
             # Get grid size
             _, num_anchors, grid_h, grid_w, num_outputs = pred.shape
@@ -165,6 +205,11 @@ class YOLODetector(L.LightningModule):
                 for gt_idx in range(len(gt_boxes)):
                     gt_box = gt_boxes_cxcywh[gt_idx]
                     gt_label = gt_labels[gt_idx]
+
+                    # Validate label is within valid range
+                    assert 0 <= gt_label < self.detection_head.num_classes, \
+                        f"Label {gt_label} out of range [0, {self.detection_head.num_classes}). " \
+                        f"Original label: {targets[batch_idx]['labels'][gt_idx]}, NUM_CLASSES config: {self.config.DATA.NUM_CLASSES}"
 
                     # Get grid cell
                     cx, cy, w, h = gt_box

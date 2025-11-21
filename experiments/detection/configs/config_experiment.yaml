@@ -16,16 +16,14 @@ MODEL:
   # Progressive unfreezing
   NUM_BLOCKS_TO_UNFREEZE: 0  # 0 = freeze entire backbone, 1-4 = unfreeze last N blocks
 
-  # YOLO detection parameters
-  STRIDES: [8, 16, 32]  # Feature strides for P3, P4, P5
+  # YOLO detection parameters (single-scale)
+  STRIDES: [32]  # Feature stride for last backbone feature (P5)
 
-  # Anchor boxes for each scale (in pixel space)
-  # Format: [scale1_anchors, scale2_anchors, scale3_anchors]
-  # Each scale has 3 anchors: [(w1,h1), (w2,h2), (w3,h3)]
+  # Anchor boxes for single scale (in pixel space)
+  # Format: [scale_anchors] - single scale with 3 anchors
+  # Each anchor: (w, h) in pixels
   ANCHORS:
-    - [[10, 13], [16, 30], [33, 23]]      # P3/8
-    - [[30, 61], [62, 45], [59, 119]]     # P4/16
-    - [[116, 90], [156, 198], [373, 326]]  # P5/32
+    - [[116, 90], [156, 198], [373, 326]]  # P5/32 - larger anchors for deeper features
 
   # Loss weights
   LOSS_WEIGHTS:
@@ -40,7 +38,7 @@ MODEL:
 
 DATA:
   DATA_PATH: dataset/supervised/synthetic_yolo
-  NUM_CLASSES: 3  # Including background: 0=background, 1=class1, 2=class2, etc.
+  NUM_CLASSES: 4  # Including background: 0=background, 1=class1, 2=class2, etc.
 
   # SAR-specific normalization
   SAR_NORM_SCALE: null  # Set to 16 for Capella data, null for others
@@ -53,7 +51,7 @@ DATA:
     RANDOM_GAMMA: true
 
 TRAIN:
-  GPUS: 2
+  GPUS: 1
   NUM_WORKERS: 4
   EPOCHS: 50
   BATCH_SIZE: 8
@@ -61,7 +59,7 @@ TRAIN:
   WEIGHT_DECAY: 0.0001
   LOG_FREQ: 10
 
-  # Learning rate scheduler
+  # Learning rate schedulers
   SCHEDULER:
     ENABLED: true
     MIN_LR: 0.00001
@@ -74,6 +72,6 @@ LOGGING:
 
 # Experiment tracking
 EXPERIMENT:
-  NAME: faster_rcnn_detection
+  NAME: yolo_detection
   VERSION: null  # Auto-increment if null
   TAGS: []  # List of tags for experiment tracking

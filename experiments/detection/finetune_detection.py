@@ -292,8 +292,10 @@ def main():
     print("\n" + "="*80)
     print("TRAINING COMPLETE")
     print("="*80)
-    print(f"Best checkpoint: {checkpoint_callback.best_model_path}")
-    print(f"Best mAP@0.5:0.95: {checkpoint_callback.best_model_score:.4f}")
+    if not args.fast_dev_run:
+        print(f"Best checkpoint: {checkpoint_callback.best_model_path}")
+        if checkpoint_callback.best_model_score is not None:
+            print(f"Best mAP@0.5:0.95: {checkpoint_callback.best_model_score:.4f}")
     print(f"TensorBoard logs: {logger.log_dir}")
     print("="*80 + "\n")
 
