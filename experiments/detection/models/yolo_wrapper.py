@@ -324,10 +324,10 @@ class YOLODetector(L.LightningModule):
         loss_dict = self(images, targets)
 
         # Log losses
-        self.log('train/loss', loss_dict['loss'], prog_bar=True, on_step=True, on_epoch=True)
-        self.log('train/box_loss', loss_dict['box_loss'], on_step=True, on_epoch=True)
-        self.log('train/obj_loss', loss_dict['obj_loss'], on_step=True, on_epoch=True)
-        self.log('train/cls_loss', loss_dict['cls_loss'], on_step=True, on_epoch=True)
+        self.log('train/loss', loss_dict['loss'], prog_bar=True, on_step=True, on_epoch=True, sync_dist=True)
+        self.log('train/box_loss', loss_dict['box_loss'], on_step=True, on_epoch=True, sync_dist=True)
+        self.log('train/obj_loss', loss_dict['obj_loss'], on_step=True, on_epoch=True, sync_dist=True)
+        self.log('train/cls_loss', loss_dict['cls_loss'], on_step=True, on_epoch=True, sync_dist=True)
 
         return loss_dict['loss']
 
@@ -371,12 +371,12 @@ class YOLODetector(L.LightningModule):
         )
 
         # Log metrics
-        self.log('val/mAP_50', map_50, prog_bar=True)
-        self.log('val/mAP_75', map_75)
-        self.log('val/mAP_50_95', map_50_95, prog_bar=True)
-        self.log('val/F1', f1_score, prog_bar=True)
-        self.log('val/precision', precision)
-        self.log('val/recall', recall)
+        self.log('val/mAP_50', map_50, prog_bar=True, sync_dist=True)
+        self.log('val/mAP_75', map_75, sync_dist=True)
+        self.log('val/mAP_50_95', map_50_95, prog_bar=True, sync_dist=True)
+        self.log('val/F1', f1_score, prog_bar=True, sync_dist=True)
+        self.log('val/precision', precision, sync_dist=True)
+        self.log('val/recall', recall, sync_dist=True)
 
         # Clear storage
         self.val_predictions = []
@@ -481,10 +481,13 @@ class YOLODetector(L.LightningModule):
                     all_gt_boxes.append(gt_boxes)
                     all_gt_matched.append(torch.zeros(len(gt_boxes), dtype=torch.bool, device=gt_boxes.device))
 
-                # Flatten predictions
-                if len(all_pred_boxes) > 0 and all(len(x) > 0 for x in all_pred_boxes):
-                    pred_boxes_flat = torch.cat(all_pred_boxes)
-                    pred_scores_flat = torch.cat(all_pred_scores)
+                # Flatten predictions (filter out empty tensors before concatenating)
+                non_empty_pred_boxes = [x for x in all_pred_boxes if len(x) > 0]
+                non_empty_pred_scores = [x for x in all_pred_scores if len(x) > 0]
+
+                if len(non_empty_pred_boxes) > 0:
+                    pred_boxes_flat = torch.cat(non_empty_pred_boxes)
+                    pred_scores_flat = torch.cat(non_empty_pred_scores)
                 else:
                     pred_boxes_flat = torch.empty((0, 4), device=self.device)
                     pred_scores_flat = torch.empty((0,), device=self.device)

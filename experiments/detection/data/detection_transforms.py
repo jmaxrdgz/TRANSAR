@@ -15,6 +15,112 @@ import torch
 import torchvision.transforms.functional as TF
 from typing import Dict, List, Tuple
 from PIL import Image
+import numpy as np
+
+
+def letterbox_resize(
+    image: Image.Image,
+    target_size: int,
+    fill: int = 128
+) -> Tuple[Image.Image, float, Tuple[int, int]]:
+    """
+    Resize image with aspect ratio preservation using letterbox (padding).
+    This is the standard YOLO preprocessing approach.
+
+    Args:
+        image: PIL Image to resize
+        target_size: Target size for both width and height (square output)
+        fill: Fill value for padding (default: 128 for gray)
+
+    Returns:
+        Tuple of:
+            - Resized and padded image (square)
+            - Scale factor applied
+            - Padding (pad_left, pad_top) in pixels
+    """
+    # Get original dimensions
+    orig_width, orig_height = image.size
+
+    # Calculate scale factor to fit image in target_size while preserving aspect ratio
+    scale = min(target_size / orig_width, target_size / orig_height)
+
+    # Calculate new dimensions after scaling
+    new_width = int(orig_width * scale)
+    new_height = int(orig_height * scale)
+
+    # Resize image with aspect ratio preserved
+    resized_image = image.resize((new_width, new_height), Image.BILINEAR)
+
+    # Calculate padding to center the image
+    pad_left = (target_size - new_width) // 2
+    pad_top = (target_size - new_height) // 2
+    pad_right = target_size - new_width - pad_left
+    pad_bottom = target_size - new_height - pad_top
+
+    # Create new image with padding
+    padded_image = Image.new(image.mode, (target_size, target_size), color=(fill, fill, fill))
+    padded_image.paste(resized_image, (pad_left, pad_top))
+
+    return padded_image, scale, (pad_left, pad_top)
+
+
+def adjust_boxes_for_letterbox(
+    boxes: torch.Tensor,
+    scale: float,
+    pad_x: int,
+    pad_y: int,
+    orig_size: Tuple[int, int],
+    target_size: int
+) -> torch.Tensor:
+    """
+    Adjust YOLO normalized boxes after letterbox resizing.
+
+    YOLO boxes are in normalized format (x_center, y_center, width, height) in [0, 1].
+    After letterbox:
+    1. Convert to absolute coords on original image
+    2. Apply scale and padding
+    3. Convert back to normalized coords on letterboxed image
+
+    Args:
+        boxes: YOLO format boxes [N, 4] normalized to [0, 1]
+        scale: Scale factor from letterbox resize
+        pad_x: Left padding in pixels
+        pad_y: Top padding in pixels
+        orig_size: Original image (height, width)
+        target_size: Target size after letterbox
+
+    Returns:
+        Adjusted boxes [N, 4] in YOLO format normalized to letterboxed image
+    """
+    if len(boxes) == 0:
+        return boxes
+
+    orig_h, orig_w = orig_size
+
+    # Convert from normalized [0,1] to absolute pixels on original image
+    boxes_abs = boxes.clone()
+    boxes_abs[:, 0] = boxes[:, 0] * orig_w  # x_center
+    boxes_abs[:, 1] = boxes[:, 1] * orig_h  # y_center
+    boxes_abs[:, 2] = boxes[:, 2] * orig_w  # width
+    boxes_abs[:, 3] = boxes[:, 3] * orig_h  # height
+
+    # Apply scale and padding
+    boxes_abs[:, 0] = boxes_abs[:, 0] * scale + pad_x  # x_center
+    boxes_abs[:, 1] = boxes_abs[:, 1] * scale + pad_y  # y_center
+    boxes_abs[:, 2] = boxes_abs[:, 2] * scale  # width
+    boxes_abs[:, 3] = boxes_abs[:, 3] * scale  # height
+
+    # Convert back to normalized coordinates [0, 1] on letterboxed image
+    boxes_normalized = boxes_abs.clone()
+    boxes_normalized[:, 0] = boxes_abs[:, 0] / target_size  # x_center
+    boxes_normalized[:, 1] = boxes_abs[:, 1] / target_size  # y_center
+    boxes_normalized[:, 2] = boxes_abs[:, 2] / target_size  # width
+    boxes_normalized[:, 3] = boxes_abs[:, 3] / target_size  # height
+
+    # Clamp to valid range [0, 1]
+    boxes_normalized = boxes_normalized.clamp(min=0.0, max=1.0)
+
+    return boxes_normalized
 
 
 def yolo_to_torchvision_format(
@@ -73,13 +179,13 @@ def yolo_to_torchvision_format(
 
 def detection_collate_fn(batch: List[Dict], target_size: int = 256) -> Dict:
     """
-    Custom collate function for object detection.
-    Converts batches from YOLO dataset format to torchvision Faster R-CNN format.
+    Custom collate function for object detection with letterbox resizing.
+    Preserves aspect ratio using letterbox (resize + padding).
 
     Args:
         batch: List of dicts from SARDetYoloDataset with keys:
-            - 'image': Tensor [C, H, W]
-            - 'boxes': Tensor [N, 4] in YOLO format
+            - 'image': PIL Image or Tensor [C, H, W]
+            - 'boxes': Tensor [N, 4] in YOLO format (normalized)
             - 'labels': Tensor [N]
             - 'image_id': int
             - 'orig_size': Tensor [H, W]
@@ -87,7 +193,7 @@ def detection_collate_fn(batch: List[Dict], target_size: int = 256) -> Dict:
 
     Returns:
         Dict with:
-            - 'images': List of image tensors
+            - 'images': List of image tensors [3, target_size, target_size]
             - 'targets': List of target dicts with 'boxes', 'labels', 'image_id'
     """
     images = []
@@ -98,25 +204,55 @@ def detection_collate_fn(batch: List[Dict], target_size: int = 256) -> Dict:
         boxes = sample['boxes']
         labels = sample['labels']
         image_id = sample['image_id']
+        orig_size = sample['orig_size']  # [H, W]
 
-        # Convert PIL Image to tensor if needed
-        if isinstance(image, Image.Image):
-            # Resize to target size
-            image = TF.resize(image, [target_size, target_size])
-            image = TF.to_tensor(image)
+        # Convert tensor to PIL Image if needed for letterbox resize
+        if isinstance(image, torch.Tensor):
+            # Convert tensor [C, H, W] to PIL Image
+            if image.shape[0] == 1:
+                # Single channel - convert to grayscale PIL
+                image = TF.to_pil_image(image, mode='L')
+                # Convert to RGB for consistency
+                image = image.convert('RGB')
+            else:
+                # Multi-channel
+                image = TF.to_pil_image(image)
+        elif isinstance(image, Image.Image):
+            # Ensure RGB mode
+            if image.mode != 'RGB':
+                image = image.convert('RGB')
         else:
-            # Already a tensor, resize it
-            image = TF.resize(image, [target_size, target_size])
+            raise TypeError(f"Unsupported image type: {type(image)}")
 
-        # Replicate single channel to 3 channels for Faster R-CNN (expects RGB)
+        # Apply letterbox resize (preserves aspect ratio)
+        letterboxed_image, scale, (pad_x, pad_y) = letterbox_resize(
+            image, target_size, fill=128
+        )
+
+        # Adjust bounding boxes for letterbox transformation
+        if len(boxes) > 0:
+            boxes = adjust_boxes_for_letterbox(
+                boxes=boxes,
+                scale=scale,
+                pad_x=pad_x,
+                pad_y=pad_y,
+                orig_size=(orig_size[0].item(), orig_size[1].item()),  # (H, W)
+                target_size=target_size
+            )
+
+        # Convert to tensor
+        image = TF.to_tensor(letterboxed_image)
+
+        # Replicate single channel to 3 channels if needed
+        # (letterbox_resize already ensures RGB, so this is redundant but safe)
         if image.shape[0] == 1:
             image = image.repeat(3, 1, 1)
 
-        # Get image size (H, W) after resizing
+        # Get image size (should be target_size x target_size)
         _, h, w = image.shape
         image_size = (h, w)
 
-        # Convert to torchvision format
+        # Convert to torchvision format (YOLO normalized -> absolute xyxy)
         target = yolo_to_torchvision_format(boxes, labels, image_size)
         target['image_id'] = torch.tensor([image_id])
 
