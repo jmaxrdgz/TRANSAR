@@ -215,9 +215,7 @@ class YOLODetectionHead(nn.Module):
                 scores = torch.zeros((0,), device=device)
                 labels = torch.zeros((0,), device=device, dtype=torch.long)
 
-            # Add 1 to labels for torchvision compatibility (0 = background)
-            labels = labels + 1
-
+            # Labels are 0-indexed (no background class in YOLO)
             batch_detections.append({
                 'boxes': boxes,
                 'scores': scores,
@@ -245,6 +243,14 @@ def build_yolo_head(
     Returns:
         YOLODetectionHead instance
     """
+    # Validate num_classes is provided
+    if num_classes is None:
+        raise ValueError(
+            "num_classes cannot be None. If config.DATA.NUM_CLASSES is None, "
+            "it must be inferred from the dataset before creating the model. "
+            "Set config.DATA.NUM_CLASSES to the value from train_dataset.num_classes."
+        )
+
     if anchors is None:
         # Default YOLOv5-small anchors (pixel space)
         anchors = [

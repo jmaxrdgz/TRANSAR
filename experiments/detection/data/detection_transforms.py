@@ -167,9 +167,8 @@ def yolo_to_torchvision_format(
     boxes_xyxy[:, 2].clamp_(min=0, max=w)
     boxes_xyxy[:, 3].clamp_(min=0, max=h)
 
-    # Convert labels to int64 and add 1 to shift from [0, num_classes-1] to [1, num_classes]
-    # (torchvision uses 0 for background)
-    labels = labels.long() + 1
+    # Convert labels to int64 (keep 0-indexed: no background class)
+    labels = labels.long()
 
     return {
         'boxes': boxes_xyxy,
@@ -319,16 +318,21 @@ def create_detection_dataloaders(config):
     train_dataset = SARDetYoloDataset(
         root_dir=config.DATA.DATA_PATH,
         split='train',
-        num_classes=config.DATA.NUM_CLASSES - 1,  # SARDetYoloDataset expects num foreground classes
+        num_classes=config.DATA.NUM_CLASSES,
         transform=train_transform
     )
 
     val_dataset = SARDetYoloDataset(
         root_dir=config.DATA.DATA_PATH,
         split='val',
-        num_classes=config.DATA.NUM_CLASSES - 1,
+        num_classes=config.DATA.NUM_CLASSES,
         transform=val_transform
     )
+
+    # Infer num_classes from dataset if not specified in config
+    if config.DATA.NUM_CLASSES is None:
+        config.DATA.NUM_CLASSES = train_dataset.num_classes
+        print(f"Inferred num_classes from dataset: {config.DATA.NUM_CLASSES}")
 
     # Create collate function with target size from config
     collate_fn_with_size = partial(detection_collate_fn, target_size=config.MODEL.IN_SIZE)

@@ -169,7 +169,7 @@ def create_test_dataloader(config, batch_size=4, num_workers=4):
     test_dataset = SARDetYoloDataset(
         root_dir=config.DATA.DATA_PATH,
         split='test',
-        num_classes=config.DATA.NUM_CLASSES - 1,  # Exclude background
+        num_classes=config.DATA.NUM_CLASSES,
         transform=val_transform
     )
 

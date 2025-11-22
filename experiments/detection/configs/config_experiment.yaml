@@ -6,7 +6,7 @@ SEED: 42
 MODEL:
   NAME: YOLO
   IN_SIZE: 256
-  IN_CHANS: 1  # SAR images are single-channel
+  IN_CHANS: 3  # SAR images are single-channel
 
   BACKBONE:
     NAME: swinv2_tiny_window8_256  # Options: swinv2_tiny_window8_256, resnet50, convnext_tiny, etc.
@@ -37,8 +37,8 @@ MODEL:
   MAX_DETECTIONS: 300   # Maximum number of detections per image
 
 DATA:
-  DATA_PATH: dataset/supervised/synthetic_yolo
-  NUM_CLASSES: 4  # Including background: 0=background, 1=class1, 2=class2, etc.
+  DATA_PATH: dataset/supervised/PascalVOC
+  NUM_CLASSES: null  # Infers number of classes from dataset if null
 
   # SAR-specific normalization
   SAR_NORM_SCALE: null  # Set to 16 for Capella data, null for others

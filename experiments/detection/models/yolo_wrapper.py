@@ -14,39 +14,6 @@ from .backbone_adapter import TimmBackboneAdapter
 from .yolo_head import build_yolo_head
 
 
-class FeatureAdapter(nn.Module):
-    """
-    Adapter to convert backbone features to YOLO-compatible channels.
-    Uses 1x1 convolutions to adjust channel dimensions.
-    """
-
-    def __init__(self, in_channels: List[int], out_channels: List[int]):
-        """
-        Args:
-            in_channels: List of input channel counts from backbone
-            out_channels: List of desired output channel counts for YOLO
-        """
-        super().__init__()
-
-        self.adapters = nn.ModuleList([
-            nn.Conv2d(in_ch, out_ch, kernel_size=1, stride=1, padding=0)
-            if in_ch != out_ch else nn.Identity()
-            for in_ch, out_ch in zip(in_channels, out_channels)
-        ])
-
-    def forward(self, features: List[torch.Tensor]) -> List[torch.Tensor]:
-        """
-        Adapt feature channels.
-
-        Args:
-            features: List of feature tensors from backbone
-
-        Returns:
-            List of adapted feature tensors
-        """
-        return [adapter(feat) for adapter, feat in zip(self.adapters, features)]
-
-
 class YOLODetector(L.LightningModule):
     """
     Lightning module wrapping YOLO with custom backbones for object detection.
@@ -61,12 +28,10 @@ class YOLODetector(L.LightningModule):
         self.save_hyperparameters(ignore=['config'])
         self.config = config
 
-        # Determine actual input channels for backbone
-        # If custom weights are provided, they expect IN_CHANS from config
+        # Input channels for backbone
         backbone_in_chans = config.MODEL.IN_CHANS
 
-        # Build backbone adapter with correct input channels
-        # Use only the last feature level (index 3 = 4th level, deepest features)
+        # Build backbone adapter 
         self.backbone_adapter = TimmBackboneAdapter(
             backbone_name=config.MODEL.BACKBONE.NAME,
             pretrained=config.MODEL.BACKBONE.PRETRAINED,
@@ -93,7 +58,7 @@ class YOLODetector(L.LightningModule):
         # Build YOLO detection head for single scale
         self.detection_head = build_yolo_head(
             in_channels=backbone_out_channels,  # List with single element
-            num_classes=config.DATA.NUM_CLASSES - 1,  # Exclude background
+            num_classes=config.DATA.NUM_CLASSES,
             anchors=anchors,
             strides=strides
         )
@@ -196,7 +161,7 @@ class YOLODetector(L.LightningModule):
                     continue
 
                 gt_boxes = targets[batch_idx]['boxes']  # [N, 4] in (x1, y1, x2, y2)
-                gt_labels = targets[batch_idx]['labels'] - 1  # Convert to 0-indexed (remove background)
+                gt_labels = targets[batch_idx]['labels']  # Already 0-indexed from YOLO format
 
                 # Convert boxes to center format
                 gt_boxes_cxcywh = box_convert(gt_boxes, 'xyxy', 'cxcywh')
@@ -459,7 +424,7 @@ class YOLODetector(L.LightningModule):
         for iou_thresh in iou_thresholds:
             class_aps = []
 
-            for class_id in range(1, num_classes):  # Skip background class 0
+            for class_id in range(num_classes):  # Labels are 0-indexed (0 to num_classes-1)
                 # Collect all predictions and targets for this class
                 all_pred_boxes = []
                 all_pred_scores = []
