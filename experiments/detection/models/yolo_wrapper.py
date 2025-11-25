@@ -85,6 +85,7 @@ class YOLODetector(L.LightningModule):
 
         self.val_predictions = []
         self.val_targets = []
+        self.val_images = []
 
     def forward(self, images, targets=None):
         if isinstance(images, list):
@@ -206,6 +207,7 @@ class YOLODetector(L.LightningModule):
             self.map_metric.update(predictions, targets)
         self.val_predictions.extend(predictions)
         self.val_targets.extend(targets)
+        self.val_images.extend([img.cpu() for img in images])
 
     def on_validation_epoch_end(self):
         if len(self.val_predictions) == 0:
@@ -231,6 +233,7 @@ class YOLODetector(L.LightningModule):
 
         self.val_predictions = []
         self.val_targets = []
+        self.val_images = []
 
     def _compute_f1(self, predictions: List[Dict], targets: List[Dict], iou_threshold: float = 0.5):
         total_tp = total_fp = total_fn = 0

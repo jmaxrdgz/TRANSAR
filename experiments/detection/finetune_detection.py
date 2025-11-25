@@ -20,6 +20,7 @@ from lightning.pytorch.loggers import TensorBoardLogger
 from utils.config import load_config
 from experiments.detection.models import YOLODetector
 from experiments.detection.data import create_detection_dataloaders
+from experiments.detection.callbacks import ValidationVisualizationCallback
 
 
 def parse_args():
@@ -267,6 +268,14 @@ def main():
     # Learning rate monitor
     lr_monitor = LearningRateMonitor(logging_interval='epoch')
     callbacks.append(lr_monitor)
+
+    # Visualization callback
+    viz_callback = ValidationVisualizationCallback(
+        num_images=3,
+        save_to_disk=True,
+        log_to_tensorboard=True
+    )
+    callbacks.append(viz_callback)
 
     # Create trainer
     trainer = L.Trainer(
