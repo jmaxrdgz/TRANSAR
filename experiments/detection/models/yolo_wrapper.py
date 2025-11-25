@@ -13,6 +13,14 @@ import numpy as np
 from .backbone_adapter import TimmBackboneAdapter
 from .yolo_head import build_yolo_head
 
+# Try to use torchmetrics for more robust metric computation
+try:
+    from torchmetrics.detection import MeanAveragePrecision
+    TORCHMETRICS_AVAILABLE = True
+except ImportError:
+    TORCHMETRICS_AVAILABLE = False
+    print("Warning: torchmetrics not available, using custom mAP implementation")
+
 
 class YOLODetector(L.LightningModule):
     """
@@ -76,7 +84,18 @@ class YOLODetector(L.LightningModule):
         self.conf_threshold = config.MODEL.CONF_THRESHOLD if hasattr(config.MODEL, 'CONF_THRESHOLD') else 0.25
         self.nms_threshold = config.MODEL.NMS_THRESHOLD if hasattr(config.MODEL, 'NMS_THRESHOLD') else 0.45
 
-        # Validation metrics storage
+        # Initialize torchmetrics for robust metric computation
+        if TORCHMETRICS_AVAILABLE:
+            self.map_metric = MeanAveragePrecision(
+                box_format='xyxy',
+                iou_type='bbox',
+                class_metrics=False  # Set to True if you want per-class metrics
+            )
+            print("Using torchmetrics.detection.MeanAveragePrecision for metric computation")
+        else:
+            self.map_metric = None
+
+        # Validation metrics storage (only used if torchmetrics not available)
         self.val_predictions = []
         self.val_targets = []
 
@@ -311,7 +330,12 @@ class YOLODetector(L.LightningModule):
         with torch.no_grad():
             predictions = self(images)
 
-        # Store for epoch-end metric computation
+        # Update metrics
+        if TORCHMETRICS_AVAILABLE and self.map_metric is not None:
+            # torchmetrics updates incrementally during validation
+            self.map_metric.update(predictions, targets)
+
+        # Always store predictions for F1 computation (torchmetrics doesn't provide detection F1)
         self.val_predictions.extend(predictions)
         self.val_targets.extend(targets)
 
@@ -322,13 +346,31 @@ class YOLODetector(L.LightningModule):
         if len(self.val_predictions) == 0:
             return
 
-        # Compute mAP
-        map_50, map_75, map_50_95 = self._compute_map(
-            self.val_predictions,
-            self.val_targets
-        )
+        # Compute mAP metrics
+        if TORCHMETRICS_AVAILABLE and self.map_metric is not None:
+            # Use torchmetrics for mAP (recommended - well-tested, follows COCO standards)
+            metric_dict = self.map_metric.compute()
 
-        # Compute F1 score
+            # Extract mAP metrics
+            map_50 = metric_dict.get('map_50', 0.0)
+            map_75 = metric_dict.get('map_75', 0.0)
+            map_50_95 = metric_dict.get('map', 0.0)  # COCO mAP (averaged over IoU thresholds)
+
+            # Convert to float if tensor
+            map_50 = map_50.item() if isinstance(map_50, torch.Tensor) else float(map_50)
+            map_75 = map_75.item() if isinstance(map_75, torch.Tensor) else float(map_75)
+            map_50_95 = map_50_95.item() if isinstance(map_50_95, torch.Tensor) else float(map_50_95)
+
+            # Reset metric for next epoch
+            self.map_metric.reset()
+        else:
+            # Fallback to custom implementation
+            map_50, map_75, map_50_95 = self._compute_map(
+                self.val_predictions,
+                self.val_targets
+            )
+
+        # Compute F1 score (torchmetrics doesn't provide F1 for detection)
         f1_score, precision, recall = self._compute_f1(
             self.val_predictions,
             self.val_targets,
