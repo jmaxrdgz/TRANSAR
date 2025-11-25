@@ -135,6 +135,18 @@ def parse_args():
         action='store_true',
         help='Run a quick test (1 batch per epoch)'
     )
+    parser.add_argument(
+        '--limit_train_batches',
+        type=float,
+        default=None,
+        help='Limit number of training batches per epoch (for debugging)'
+    )
+    parser.add_argument(
+        '--limit_val_batches',
+        type=float,
+        default=None,
+        help='Limit number of validation batches per epoch (for debugging)'
+    )
 
     return parser.parse_args()
 
@@ -265,6 +277,8 @@ def main():
         callbacks=callbacks,
         log_every_n_steps=config.TRAIN.LOG_FREQ,
         fast_dev_run=args.fast_dev_run,
+        limit_train_batches=args.limit_train_batches if args.limit_train_batches is not None else 1.0,
+        limit_val_batches=args.limit_val_batches if args.limit_val_batches is not None else 1.0,
         precision='16-mixed' if torch.cuda.is_available() else 32,
         gradient_clip_val=1.0,  # Gradient clipping for stability
     )
