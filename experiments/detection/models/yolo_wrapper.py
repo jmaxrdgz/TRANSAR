@@ -201,6 +201,15 @@ class YOLODetector(L.LightningModule):
 
     def validation_step(self, batch, batch_idx):
         images, targets = batch['images'], batch['targets']
+
+        # Compute validation loss
+        loss_dict = self(images, targets)
+        self.log('val/loss', loss_dict['loss'], prog_bar=True, on_step=False, on_epoch=True, sync_dist=True)
+        self.log('val/box_loss', loss_dict['box_loss'], on_step=False, on_epoch=True, sync_dist=True)
+        self.log('val/obj_loss', loss_dict['obj_loss'], on_step=False, on_epoch=True, sync_dist=True)
+        self.log('val/cls_loss', loss_dict['cls_loss'], on_step=False, on_epoch=True, sync_dist=True)
+
+        # Run inference for metrics
         with torch.no_grad():
             predictions = self(images)
         if TORCHMETRICS_AVAILABLE and self.map_metric is not None:
