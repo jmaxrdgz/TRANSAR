@@ -187,15 +187,15 @@ class TRANSAR(L.LightningModule):
         # Accumulate F1 components (keep on GPU to avoid sync overhead)
         with torch.no_grad():
             tp, fp, fn = compute_f1_components(
-                pred, 
-                boxes, 
-                labels, 
-                heatmap_size=heatmap_pred.shape[-2:], 
+                pred,
+                boxes,
+                labels,
+                heatmap_size=heatmap_pred.shape[-2:],
                 is_binary=self.is_binary
             )
-            self.train_tp += tp
-            self.train_fp += fp
-            self.train_fn += fn
+            self.val_tp += tp
+            self.val_fp += fp
+            self.val_fn += fn
 
         self.log('val_loss', loss, prog_bar=True, sync_dist=True)
 
