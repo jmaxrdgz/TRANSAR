@@ -364,6 +364,7 @@ class YOLODetector(L.LightningModule):
         for pred, target in zip(predictions, targets):
             pred_boxes = pred['boxes']
             pred_labels = pred['labels']
+            pred_scores = pred['scores']
             gt_boxes = target['boxes']
             gt_labels = target['labels']
 
@@ -376,13 +377,19 @@ class YOLODetector(L.LightningModule):
                 total_fn += len(gt_boxes)
                 continue
 
+            # Sort predictions by confidence (highest first) for proper matching
+            sorted_indices = torch.argsort(pred_scores, descending=True)
+            pred_boxes = pred_boxes[sorted_indices]
+            pred_labels = pred_labels[sorted_indices]
+            pred_scores = pred_scores[sorted_indices]
+
             # Compute IoU matrix
             iou_matrix = box_iou(pred_boxes, gt_boxes)
 
             # Track which GT boxes have been matched
             gt_matched = torch.zeros(len(gt_boxes), dtype=torch.bool, device=gt_boxes.device)
 
-            # For each prediction, find best matching GT
+            # For each prediction (in confidence order), find best matching GT
             for pred_idx in range(len(pred_boxes)):
                 ious = iou_matrix[pred_idx]
                 max_iou, max_idx = ious.max(dim=0)
