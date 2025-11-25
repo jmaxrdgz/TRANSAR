@@ -446,49 +446,56 @@ class YOLODetector(L.LightningModule):
                     all_gt_boxes.append(gt_boxes)
                     all_gt_matched.append(torch.zeros(len(gt_boxes), dtype=torch.bool, device=gt_boxes.device))
 
-                # Flatten predictions (filter out empty tensors before concatenating)
-                non_empty_pred_boxes = [x for x in all_pred_boxes if len(x) > 0]
-                non_empty_pred_scores = [x for x in all_pred_scores if len(x) > 0]
+                # Flatten predictions and track which image each prediction belongs to
+                pred_boxes_list = []
+                pred_scores_list = []
+                pred_image_indices = []
 
-                if len(non_empty_pred_boxes) > 0:
-                    pred_boxes_flat = torch.cat(non_empty_pred_boxes)
-                    pred_scores_flat = torch.cat(non_empty_pred_scores)
+                for img_idx, (boxes, scores) in enumerate(zip(all_pred_boxes, all_pred_scores)):
+                    if len(boxes) > 0:
+                        pred_boxes_list.append(boxes)
+                        pred_scores_list.append(scores)
+                        # Track which image each prediction came from
+                        pred_image_indices.extend([img_idx] * len(boxes))
+
+                if len(pred_boxes_list) > 0:
+                    pred_boxes_flat = torch.cat(pred_boxes_list)
+                    pred_scores_flat = torch.cat(pred_scores_list)
+                    pred_image_indices = torch.tensor(pred_image_indices, device=self.device)
                 else:
                     pred_boxes_flat = torch.empty((0, 4), device=self.device)
                     pred_scores_flat = torch.empty((0,), device=self.device)
+                    pred_image_indices = torch.empty((0,), dtype=torch.long, device=self.device)
 
-                # Sort by score
+                # Sort by score while preserving image indices
                 if len(pred_scores_flat) > 0:
                     sorted_indices = torch.argsort(pred_scores_flat, descending=True)
                     pred_boxes_flat = pred_boxes_flat[sorted_indices]
                     pred_scores_flat = pred_scores_flat[sorted_indices]
+                    pred_image_indices = pred_image_indices[sorted_indices]
 
                     # Compute AP for this class
                     tp = torch.zeros(len(pred_boxes_flat), device=self.device)
                     fp = torch.zeros(len(pred_boxes_flat), device=self.device)
 
                     # Match predictions to ground truth
-                    box_idx = 0
-                    for pred_boxes_img, gt_boxes_img, gt_matched in zip(all_pred_boxes, all_gt_boxes, all_gt_matched):
-                        num_pred_this_img = len(pred_boxes_img)
+                    # Each prediction is matched only to GTs from its original image
+                    for box_idx in range(len(pred_boxes_flat)):
+                        img_idx = pred_image_indices[box_idx].item()
+                        gt_boxes_img = all_gt_boxes[img_idx]
+                        gt_matched = all_gt_matched[img_idx]
 
-                        for _ in range(num_pred_this_img):
-                            if box_idx >= len(pred_boxes_flat):
-                                break
+                        if len(gt_boxes_img) > 0:
+                            ious = box_iou(pred_boxes_flat[box_idx:box_idx+1], gt_boxes_img)[0]
+                            max_iou, max_idx = ious.max(dim=0)
 
-                            if len(gt_boxes_img) > 0:
-                                ious = box_iou(pred_boxes_flat[box_idx:box_idx+1], gt_boxes_img)[0]
-                                max_iou, max_idx = ious.max(dim=0)
-
-                                if max_iou >= iou_thresh and not gt_matched[max_idx]:
-                                    tp[box_idx] = 1
-                                    gt_matched[max_idx] = True
-                                else:
-                                    fp[box_idx] = 1
+                            if max_iou >= iou_thresh and not gt_matched[max_idx]:
+                                tp[box_idx] = 1
+                                gt_matched[max_idx] = True
                             else:
                                 fp[box_idx] = 1
-
-                            box_idx += 1
+                        else:
+                            fp[box_idx] = 1
 
                     # Compute precision-recall curve
                     tp_cumsum = torch.cumsum(tp, dim=0)
