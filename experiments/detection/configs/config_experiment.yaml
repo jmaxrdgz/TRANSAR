@@ -15,7 +15,7 @@ MODEL:
     OUT_INDICES: [1,2,3]           # Multi-scale feature outputs (0 = shallow, 3 = deepest)
 
   # Progressive unfreezing
-  NUM_BLOCKS_TO_UNFREEZE: 0  # 0 = freeze entire backbone, 1-4 = unfreeze last N blocks
+  NUM_BLOCKS_TO_UNFREEZE: 2  # 0 = freeze entire backbone, 1-4 = unfreeze last N blocks
 
   # YOLO detection parameters
   STRIDES: [8,16,32]  # Feature strides for P3, P4, P5
@@ -37,25 +37,27 @@ MODEL:
 
 DATA:
   DATA_PATH: dataset/supervised/PascalVOC
-  NUM_CLASSES: 20  # Specify explicitly if known; otherwise null
+  NUM_CLASSES: null  # Specify explicitly if known; otherwise null
 
   # SAR-specific normalization
   SAR_NORM_SCALE: null
-  GLOBAL_STD: 1.5
+  GLOBAL_STD: null
 
   # Data augmentation
   AUGMENTATION:
     ENABLED: true
-    COLOR_JITTER: true
+    COLOR_JITTER: null
     RANDOM_GAMMA: true
 
 TRAIN:
   GPUS: 1
   NUM_WORKERS: 4
-  EPOCHS: 50
+  EPOCHS: 40
   BATCH_SIZE: 8
-  LR: 0.0001
-  WEIGHT_DECAY: 0.0001
+  HEAD_LR: 0.001        # 1e-3 for detection head
+  BACKBONE_LR: 0.0001   # 1e-4 for unfrozen backbone
+  LR: 0.0001            # Fallback for backward compatibility
+  WEIGHT_DECAY: 0.0005
   LOG_FREQ: 10
 
   # Learning rate schedulers

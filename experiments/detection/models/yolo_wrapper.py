@@ -202,8 +202,20 @@ class YOLODetector(L.LightningModule):
     def validation_step(self, batch, batch_idx):
         images, targets = batch['images'], batch['targets']
 
-        # Compute validation loss
-        loss_dict = self(images, targets)
+        # Compute validation loss by explicitly computing it
+        if isinstance(images, list):
+            images_tensor = torch.stack(images)
+        else:
+            images_tensor = images
+
+        if self.needs_channel_conversion and images_tensor.shape[1] == 3:
+            images_tensor = images_tensor[:, 0:1, :, :]
+
+        features = self.backbone(images_tensor)
+        features_list = [features[str(i)] for i in sorted(map(int, features.keys()))]
+        predictions = self.detection_head(features_list)
+
+        loss_dict = self.compute_loss(predictions, targets, images_tensor.shape[-2:])
         self.log('val/loss', loss_dict['loss'], prog_bar=True, on_step=False, on_epoch=True, sync_dist=True)
         self.log('val/box_loss', loss_dict['box_loss'], on_step=False, on_epoch=True, sync_dist=True)
         self.log('val/obj_loss', loss_dict['obj_loss'], on_step=False, on_epoch=True, sync_dist=True)
@@ -211,12 +223,16 @@ class YOLODetector(L.LightningModule):
 
         # Run inference for metrics
         with torch.no_grad():
-            predictions = self(images)
+            decoded_predictions = self.detection_head.decode_predictions(
+                predictions,
+                conf_threshold=self.conf_threshold,
+                nms_threshold=self.nms_threshold
+            )
         if TORCHMETRICS_AVAILABLE and self.map_metric is not None:
-            self.map_metric.update(predictions, targets)
-        self.val_predictions.extend(predictions)
+            self.map_metric.update(decoded_predictions, targets)
+        self.val_predictions.extend(decoded_predictions)
         self.val_targets.extend(targets)
-        self.val_images.extend([img.cpu() for img in images])
+        self.val_images.extend([img.cpu() for img in images_tensor])
 
     def on_validation_epoch_end(self):
         if len(self.val_predictions) == 0:
@@ -284,8 +300,68 @@ class YOLODetector(L.LightningModule):
         return f1, precision, recall
 
     def configure_optimizers(self):
-        optimizer = torch.optim.AdamW(self.parameters(), lr=self.config.TRAIN.LR,
-                                      weight_decay=self.config.TRAIN.WEIGHT_DECAY)
+        """
+        Configure optimizer with differential learning rates for head and backbone.
+
+        Learning rate strategy:
+        - Detection head: TRAIN.HEAD_LR (default: 1e-3)
+        - Backbone (unfrozen): TRAIN.BACKBONE_LR (default: 1e-4)
+        - Frozen backbone params: Excluded from optimizer
+        """
+
+        # Get learning rates from config with backward compatibility
+        head_lr = getattr(self.config.TRAIN, 'HEAD_LR', self.config.TRAIN.LR)
+        backbone_lr = getattr(self.config.TRAIN, 'BACKBONE_LR', self.config.TRAIN.LR)
+
+        # Separate parameters into groups
+        head_params = []
+        backbone_params = []
+
+        # Collect detection head parameters (only trainable)
+        for name, param in self.detection_head.named_parameters():
+            if param.requires_grad:
+                head_params.append(param)
+
+        # Collect backbone parameters (only unfrozen ones)
+        for name, param in self.backbone.named_parameters():
+            if param.requires_grad:
+                backbone_params.append(param)
+
+        # Create parameter groups
+        param_groups = []
+
+        if backbone_params:
+            param_groups.append({
+                'params': backbone_params,
+                'lr': backbone_lr,
+                'name': 'backbone'
+            })
+
+        if head_params:
+            param_groups.append({
+                'params': head_params,
+                'lr': head_lr,
+                'name': 'head'
+            })
+
+        # Verify all trainable params are included
+        total_trainable = sum(p.numel() for p in self.parameters() if p.requires_grad)
+        total_in_groups = sum(p.numel() for group in param_groups for p in group['params'])
+
+        assert total_in_groups == total_trainable, \
+            f"Parameter mismatch: {total_in_groups} in groups vs {total_trainable} trainable"
+
+        # Create optimizer with parameter groups
+        optimizer = torch.optim.AdamW(
+            param_groups,
+            weight_decay=self.config.TRAIN.WEIGHT_DECAY
+        )
+
+        # Log parameter group info
+        print(f"[Optimizer] Head params: {len(head_params)} with LR={head_lr}")
+        print(f"[Optimizer] Backbone params: {len(backbone_params)} with LR={backbone_lr}")
+
+        # Add scheduler if enabled (works automatically with param groups)
         if getattr(self.config.TRAIN, 'SCHEDULER', None) and getattr(self.config.TRAIN.SCHEDULER, 'ENABLED', False):
             scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
                 optimizer,
