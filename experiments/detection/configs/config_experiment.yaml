@@ -1,29 +1,28 @@
 # config_experiment.yaml
-# Configuration for YOLO detection experiments with multiple backbones
+# Configuration for YOLO detection experiments with timm backbones (SwinV2/ResNet/ConvNeXt)
 
 SEED: 42
 
 MODEL:
   NAME: YOLO
   IN_SIZE: 256
-  IN_CHANS: 3  # SAR images are single-channel
+  IN_CHANS: 1  # SAR images are single-channel
 
   BACKBONE:
     NAME: swinv2_tiny_window8_256  # Options: swinv2_tiny_window8_256, resnet50, convnext_tiny, etc.
-    PRETRAINED: true  # Use ImageNet pretrained weights
-    WEIGHTS: null  # Path to custom pretrained weights (overrides PRETRAINED if set)
+    PRETRAINED: true               # Use ImageNet pretrained weights
+    WEIGHTS: null                  # Path to custom pretrained weights (overrides PRETRAINED if set)
+    OUT_INDICES: [1,2,3]           # Multi-scale feature outputs (0 = shallow, 3 = deepest)
 
   # Progressive unfreezing
   NUM_BLOCKS_TO_UNFREEZE: 0  # 0 = freeze entire backbone, 1-4 = unfreeze last N blocks
 
-  # YOLO detection parameters (single-scale)
-  STRIDES: [32]  # Feature stride for last backbone feature (P5)
-
-  # Anchor boxes for single scale (in pixel space)
-  # Format: [scale_anchors] - single scale with 3 anchors
-  # Each anchor: (w, h) in pixels
+  # YOLO detection parameters
+  STRIDES: [8,16,32]  # Feature strides for P3, P4, P5
   ANCHORS:
-    - [[116, 90], [156, 198], [373, 326]]  # P5/32 - larger anchors for deeper features
+    - [[10,13],[16,30],[33,23]]   # P3/8
+    - [[30,61],[62,45],[59,119]]  # P4/16
+    - [[116,90],[156,198],[373,326]]  # P5/32
 
   # Loss weights
   LOSS_WEIGHTS:
@@ -32,17 +31,17 @@ MODEL:
     CLS: 0.5    # Classification loss weight
 
   # Inference parameters
-  CONF_THRESHOLD: 0.25  # Confidence threshold for detections
-  NMS_THRESHOLD: 0.45   # NMS IoU threshold
-  MAX_DETECTIONS: 300   # Maximum number of detections per image
+  CONF_THRESHOLD: 0.25
+  NMS_THRESHOLD: 0.45
+  MAX_DETECTIONS: 300
 
 DATA:
   DATA_PATH: dataset/supervised/PascalVOC
-  NUM_CLASSES: null  # Infers number of classes from dataset if null
+  NUM_CLASSES: 20  # Specify explicitly if known; otherwise null
 
   # SAR-specific normalization
-  SAR_NORM_SCALE: null  # Set to 16 for Capella data, null for others
-  GLOBAL_STD: 1.5  # Use scripts/compute_global_std.py to compute from training data
+  SAR_NORM_SCALE: null
+  GLOBAL_STD: 1.5
 
   # Data augmentation
   AUGMENTATION:
@@ -64,14 +63,12 @@ TRAIN:
     ENABLED: true
     MIN_LR: 0.00001
 
-# Logging and checkpointing
 LOGGING:
   LOG_DIR: logs/detection_experiments
   TENSORBOARD: true
-  SAVE_TOP_K: 3  # Save top 3 checkpoints based on validation mAP
+  SAVE_TOP_K: 3
 
-# Experiment tracking
 EXPERIMENT:
   NAME: yolo_detection
-  VERSION: null  # Auto-increment if null
-  TAGS: []  # List of tags for experiment tracking
+  VERSION: null
+  TAGS: []

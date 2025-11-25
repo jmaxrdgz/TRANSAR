@@ -392,20 +392,43 @@ def compute_per_image_metrics(predictions: List[Dict], targets: List[Dict]) -> D
 
 def compute_overall_metrics(predictions: List[Dict], targets: List[Dict], model) -> Dict:
     """
-    Compute overall metrics using model's metric functions.
+    Compute overall metrics using torchmetrics for mAP (COCO standard) and model's F1 function.
 
     Args:
         predictions: List of predictions
         targets: List of targets
-        model: FasterRCNNDetector model
+        model: YOLODetector model
 
     Returns:
         Dict with overall metrics
     """
     print("\nComputing overall metrics...")
 
-    # Use model's metric computation
-    map_50, map_75, map_50_95 = model._compute_map(predictions, targets)
+    # Use torchmetrics for mAP (COCO standard - industry best practice)
+    try:
+        from torchmetrics.detection import MeanAveragePrecision
+
+        map_metric = MeanAveragePrecision(box_format='xyxy', iou_type='bbox')
+        map_metric.update(predictions, targets)
+        metric_dict = map_metric.compute()
+
+        map_50 = metric_dict.get('map_50', 0.0)
+        map_75 = metric_dict.get('map_75', 0.0)
+        map_50_95 = metric_dict.get('map', 0.0)
+
+        # Convert to float if tensor
+        map_50 = map_50.item() if hasattr(map_50, 'item') else float(map_50)
+        map_75 = map_75.item() if hasattr(map_75, 'item') else float(map_75)
+        map_50_95 = map_50_95.item() if hasattr(map_50_95, 'item') else float(map_50_95)
+
+        print("Using torchmetrics.MeanAveragePrecision (COCO standard)")
+    except ImportError:
+        print("WARNING: torchmetrics not available. Install with: pip install torchmetrics")
+        map_50 = 0.0
+        map_75 = 0.0
+        map_50_95 = 0.0
+
+    # Use model's F1 computation
     f1, precision, recall = model._compute_f1(predictions, targets, iou_threshold=0.5)
 
     metrics = {
@@ -419,7 +442,7 @@ def compute_overall_metrics(predictions: List[Dict], targets: List[Dict], model)
 
     # Print results
     print("\n" + "="*80)
-    print("OVERALL TEST RESULTS")
+    print("OVERALL TEST RESULTS (COCO Standard mAP)")
     print("="*80)
     print(f"mAP@0.5:        {metrics['mAP_50']:.4f}")
     print(f"mAP@0.75:       {metrics['mAP_75']:.4f}")
