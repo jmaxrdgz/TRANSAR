@@ -70,7 +70,7 @@ class SimMIM(L.LightningModule):
         )
 
         # L1 loss (better than MSE for pixel reconstruction)
-        self.loss_fn = nn.L1Loss()
+        self.loss_fn = nn.L1Loss(reduction='none')
 
         print(f"[SimMIM] Backbone: {config.MODEL.BACKBONE}")
         print(f"[SimMIM] Patch size: {self.patch_size}, Embed dim: {self.embed_dim}")
@@ -267,8 +267,8 @@ class SimMIM(L.LightningModule):
 
         # 7. Compute loss on masked and visible patches
         mask_bool = mask.bool()
-        loss_masked = self.loss_fn(pred[mask_bool], patches[mask_bool])
-        loss_visible = self.loss_fn(pred[~mask_bool], patches[~mask_bool])
+        loss_masked = self.loss_fn(pred[mask_bool], patches[mask_bool]).sum() / mask_bool.sum() / self.in_chans
+        loss_visible = self.loss_fn(pred[~mask_bool], patches[~mask_bool]).sum() / (~mask_bool).sum() / self.in_chans
 
         return loss_masked, loss_visible, pred, mask
 
