@@ -202,6 +202,7 @@ class YOLODetector(L.LightningModule):
     def validation_step(self, batch, batch_idx):
         images, targets = batch['images'], batch['targets']
 
+        # Compute validation loss by explicitly computing it
         if isinstance(images, list):
             images_tensor = torch.stack(images)
         else:
@@ -220,49 +221,41 @@ class YOLODetector(L.LightningModule):
         self.log('val/obj_loss', loss_dict['obj_loss'], on_step=False, on_epoch=True, sync_dist=True)
         self.log('val/cls_loss', loss_dict['cls_loss'], on_step=False, on_epoch=True, sync_dist=True)
 
+        # Run inference for metrics
         with torch.no_grad():
             decoded_predictions = self.detection_head.decode_predictions(
                 predictions,
                 conf_threshold=self.conf_threshold,
                 nms_threshold=self.nms_threshold
             )
-
-        # Convert to small CPU objects for metric update
-        cpu_preds = [{k: v.cpu() for k, v in d.items()} for d in decoded_predictions]
-        cpu_tgts  = [{k: v.cpu() for k, v in t.items()} for t in targets]
-
         if TORCHMETRICS_AVAILABLE and self.map_metric is not None:
-            # update the torchmetrics metric (it will handle dist if supported)
-            self.map_metric.update(cpu_preds, cpu_tgts)
-        else:
-            # only collect on global zero to avoid huge distributed gathers
-            if self.trainer.is_global_zero:
-                self.val_predictions.extend(cpu_preds)
-                self.val_targets.extend(cpu_tgts)
+            self.map_metric.update(decoded_predictions, targets)
+        self.val_predictions.extend(decoded_predictions)
+        self.val_targets.extend(targets)
+        self.val_images.extend([img.cpu() for img in images_tensor])
 
     def on_validation_epoch_end(self):
         if len(self.val_predictions) == 0:
             return
 
-        if self.trainer.is_global_zero:
-            if TORCHMETRICS_AVAILABLE and self.map_metric is not None:
-                metric_dict = self.map_metric.compute()
-                self.map_metric.reset()
-                map_50 = float(metric_dict.get('map_50', 0.0))
-                map_75 = float(metric_dict.get('map_75', 0.0))
-                map_50_95 = float(metric_dict.get('map', 0.0))
-            else:
-                map_50 = map_75 = map_50_95 = 0.0
-                f1, precision, recall = self._compute_f1(self.val_predictions, self.val_targets)
-            # log on global-zero only
-            self.log('val/mAP_50', map_50, prog_bar=True)
-            self.log('val/mAP_75', map_75)
-            self.log('val/mAP_50_95', map_50_95, prog_bar=True)
-            self.log('val/F1', f1, prog_bar=True, sync_dist=True)
-            self.log('val/precision', precision, sync_dist=True)
-            self.log('val/recall', recall, sync_dist=True)
+        if TORCHMETRICS_AVAILABLE and self.map_metric is not None:
+            metric_dict = self.map_metric.compute()
+            map_50 = float(metric_dict.get('map_50', 0.0))
+            map_75 = float(metric_dict.get('map_75', 0.0))
+            map_50_95 = float(metric_dict.get('map', 0.0))
+            self.map_metric.reset()
+        else:
+            map_50 = map_75 = map_50_95 = 0.0
 
-        # clear buffers on all ranks
+        f1, precision, recall = self._compute_f1(self.val_predictions, self.val_targets)
+
+        self.log('val/mAP_50', map_50, prog_bar=True, sync_dist=True)
+        self.log('val/mAP_75', map_75, sync_dist=True)
+        self.log('val/mAP_50_95', map_50_95, prog_bar=True, sync_dist=True)
+        self.log('val/F1', f1, prog_bar=True, sync_dist=True)
+        self.log('val/precision', precision, sync_dist=True)
+        self.log('val/recall', recall, sync_dist=True)
+
         self.val_predictions = []
         self.val_targets = []
         self.val_images = []
