@@ -87,6 +87,15 @@ class YOLODetector(L.LightningModule):
         self.val_targets = []
         self.val_images = []
 
+        # For visualization: sample a fixed set of images per epoch
+        self.val_viz_sample_size = getattr(config, 'VIZ_SAMPLE_SIZE', 20)
+        self.val_viz_epoch_interval = getattr(config, 'VIZ_EPOCH_INTERVAL', 1)
+        self.val_viz_images = []
+        self.val_viz_predictions = []
+        self.val_viz_targets = []
+        self.val_viz_indices = None  # Will be set on first validation step
+        self.val_batch_counter = 0
+
     def forward(self, images, targets=None):
         if isinstance(images, list):
             images = torch.stack(images)
@@ -232,7 +241,39 @@ class YOLODetector(L.LightningModule):
             self.map_metric.update(decoded_predictions, targets)
         self.val_predictions.extend(decoded_predictions)
         self.val_targets.extend(targets)
-        self.val_images.extend([img.cpu() for img in images_tensor])
+
+        # Sample images for visualization (fixed random sample per epoch)
+        # Only collect images if they will be plotted this epoch
+        # Only rank 0 needs to store images for visualization
+        should_visualize_this_epoch = (self.current_epoch + 1) % self.val_viz_epoch_interval == 0
+
+        if self.trainer.is_global_zero and should_visualize_this_epoch:
+            batch_size = images_tensor.shape[0]
+
+            # On first batch, determine which global indices to sample
+            if self.val_viz_indices is None:
+                # Set seed for reproducibility across epochs
+                import random
+                random.seed(self.current_epoch)
+
+                # Estimate total validation samples (approximate)
+                # We'll sample from early batches to avoid storing everything
+                max_samples = min(self.val_viz_sample_size * 5, 100)  # Sample from first ~100 images
+                self.val_viz_indices = set(random.sample(range(max_samples),
+                                                          min(self.val_viz_sample_size, max_samples)))
+
+            # Check if any images in this batch should be stored
+            batch_start = self.val_batch_counter
+            batch_end = batch_start + batch_size
+
+            for i in range(batch_size):
+                global_idx = batch_start + i
+                if global_idx in self.val_viz_indices:
+                    self.val_viz_images.append(images_tensor[i].cpu())
+                    self.val_viz_predictions.append(decoded_predictions[i])
+                    self.val_viz_targets.append(targets[i])
+
+            self.val_batch_counter += batch_size
 
     def on_validation_epoch_end(self):
         if len(self.val_predictions) == 0:
@@ -256,9 +297,14 @@ class YOLODetector(L.LightningModule):
         self.log('val/precision', precision, sync_dist=True)
         self.log('val/recall', recall, sync_dist=True)
 
+        # Reset validation buffers (for metrics)
         self.val_predictions = []
         self.val_targets = []
-        self.val_images = []
+
+        # Reset visualization sample for next epoch
+        # Note: val_viz_* will be used by callback before being cleared
+        self.val_batch_counter = 0
+        self.val_viz_indices = None
 
     def _compute_f1(self, predictions: List[Dict], targets: List[Dict], iou_threshold: float = 0.5):
         total_tp = total_fp = total_fn = 0

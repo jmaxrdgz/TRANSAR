@@ -1,12 +1,10 @@
 """
-Callback for epoch-end visualization of best/worst validation images.
+Callback for epoch-end visualization of sampled validation images.
 """
 
-import os
-import json
 import io
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List
 
 import torch
 import numpy as np
@@ -17,7 +15,10 @@ from lightning.pytorch.callbacks import Callback
 
 class ValidationVisualizationCallback(Callback):
     """
-    Visualize best and worst validation images at the end of each epoch.
+    Visualize sampled validation images at the end of each epoch.
+
+    Images are randomly selected at the start of each validation epoch
+    and the same images are visualized consistently across epochs.
 
     Saves visualizations to disk and logs to TensorBoard.
     """
@@ -26,40 +27,51 @@ class ValidationVisualizationCallback(Callback):
         self,
         num_images: int = 3,
         save_to_disk: bool = True,
-        log_to_tensorboard: bool = True
+        log_to_tensorboard: bool = True,
+        epoch_interval: int = 1
     ):
         """
         Args:
-            num_images: Number of best/worst images to visualize (default: 3)
+            num_images: Number of images to visualize (default: 3)
             save_to_disk: Whether to save visualizations to disk
             log_to_tensorboard: Whether to log to TensorBoard
+            epoch_interval: Plot images only every N epochs (default: 1, i.e., every epoch)
         """
         super().__init__()
         self.num_images = num_images
         self.save_to_disk = save_to_disk
         self.log_to_tensorboard = log_to_tensorboard
+        self.epoch_interval = epoch_interval
 
     def on_validation_epoch_end(self, trainer, pl_module):
         """Called at the end of validation epoch."""
         # Only run on global rank 0 in distributed training
         if not trainer.is_global_zero:
+            # Wait for rank 0 to finish visualization in distributed training
+            if hasattr(trainer.strategy, 'barrier'):
+                trainer.strategy.barrier()
             return
 
-        # Access stored validation data
-        if not hasattr(pl_module, 'val_images') or len(pl_module.val_images) == 0:
+        # Check if we should visualize this epoch
+        if (trainer.current_epoch + 1) % self.epoch_interval != 0:
+            # Ensure barrier is called even when skipping visualization
+            if hasattr(trainer.strategy, 'barrier'):
+                trainer.strategy.barrier()
             return
 
-        images = pl_module.val_images
-        predictions = pl_module.val_predictions
-        targets = pl_module.val_targets
+        # Use sampled validation data (val_viz_*) instead of full validation set
+        if not hasattr(pl_module, 'val_viz_images') or len(pl_module.val_viz_images) == 0:
+            # Ensure barrier is called even when no images available
+            if hasattr(trainer.strategy, 'barrier'):
+                trainer.strategy.barrier()
+            return
 
-        # Compute per-image losses
-        per_image_losses = self._compute_per_image_losses(
-            pl_module, images, predictions, targets
-        )
+        images = pl_module.val_viz_images
+        predictions = pl_module.val_viz_predictions
+        targets = pl_module.val_viz_targets
 
-        # Select best and worst images
-        best_indices, worst_indices = self._select_images(per_image_losses)
+        # Limit to num_images
+        num_to_visualize = min(self.num_images, len(images))
 
         # Get save directory
         if self.save_to_disk:
@@ -67,111 +79,26 @@ class ValidationVisualizationCallback(Callback):
         else:
             save_dir = None
 
-        # Visualize best images
-        for rank, idx in enumerate(best_indices):
+        # Visualize sampled images
+        for idx in range(num_to_visualize):
             self._visualize_and_save(
                 image=images[idx],
                 prediction=predictions[idx],
                 target=targets[idx],
-                loss_info=per_image_losses[idx],
-                title_prefix=f"Best Loss #{rank+1}",
-                save_path=save_dir / f"best_loss_{rank+1}.png" if save_dir else None,
+                title_prefix=f"Sample #{idx+1}",
+                save_path=save_dir / f"sample_{idx+1}.png" if save_dir else None,
                 trainer=trainer,
-                tag=f"validation/best_loss_{rank+1}"
+                tag=f"validation/sample_{idx+1}"
             )
 
-        # Visualize worst images
-        for rank, idx in enumerate(worst_indices):
-            self._visualize_and_save(
-                image=images[idx],
-                prediction=predictions[idx],
-                target=targets[idx],
-                loss_info=per_image_losses[idx],
-                title_prefix=f"Worst Loss #{rank+1}",
-                save_path=save_dir / f"worst_loss_{rank+1}.png" if save_dir else None,
-                trainer=trainer,
-                tag=f"validation/worst_loss_{rank+1}"
-            )
+        # Clear visualization buffers after use
+        pl_module.val_viz_images = []
+        pl_module.val_viz_predictions = []
+        pl_module.val_viz_targets = []
 
-        # Save metadata
-        if self.save_to_disk and save_dir:
-            self._save_metadata(
-                save_dir, trainer.current_epoch,
-                per_image_losses, best_indices, worst_indices
-            )
-
-    def _compute_per_image_losses(
-        self,
-        pl_module,
-        images: List[torch.Tensor],
-        predictions: List[Dict],
-        targets: List[Dict]
-    ) -> List[Dict[str, float]]:
-        """
-        Compute loss for each validation image.
-
-        Returns:
-            List of dicts with 'total_loss', 'box_loss', 'obj_loss', 'cls_loss'
-        """
-        per_image_losses = []
-
-        for img, pred, target in zip(images, predictions, targets):
-            # Move to model device
-            img = img.to(pl_module.device)
-            target = {k: v.to(pl_module.device) if isinstance(v, torch.Tensor) else v
-                     for k, v in target.items()}
-
-            # Forward pass to get raw predictions (before NMS)
-            with torch.no_grad():
-                # Get features from backbone
-                img_batch = img.unsqueeze(0)
-                if pl_module.needs_channel_conversion and img_batch.shape[1] == 3:
-                    img_batch = img_batch[:, 0:1, :, :]
-
-                features = pl_module.backbone(img_batch)
-                features_list = [features[str(i)] for i in sorted(map(int, features.keys()))]
-
-                # Get raw predictions from detection head
-                raw_predictions = pl_module.detection_head(features_list)
-
-                # Compute loss
-                loss_dict = pl_module.compute_loss(
-                    raw_predictions,
-                    [target],
-                    img.shape[-2:]
-                )
-
-            per_image_losses.append({
-                'total_loss': float(loss_dict['loss']),
-                'box_loss': float(loss_dict['box_loss']),
-                'obj_loss': float(loss_dict['obj_loss']),
-                'cls_loss': float(loss_dict['cls_loss'])
-            })
-
-        return per_image_losses
-
-    def _select_images(
-        self,
-        per_image_losses: List[Dict]
-    ) -> Tuple[List[int], List[int]]:
-        """
-        Select best and worst images based on total loss.
-
-        Returns:
-            Tuple of (best_indices, worst_indices)
-        """
-        # Sort by total loss
-        sorted_indices = sorted(
-            range(len(per_image_losses)),
-            key=lambda i: per_image_losses[i]['total_loss']
-        )
-
-        # Best = lowest loss
-        best_indices = sorted_indices[:self.num_images]
-        # Worst = highest loss
-        worst_indices = sorted_indices[-self.num_images:][::-1]  # Reverse for descending order
-
-        return best_indices, worst_indices
+        # Synchronize with other ranks in distributed training
+        if hasattr(trainer.strategy, 'barrier'):
+            trainer.strategy.barrier()
 
     def _get_save_directory(self, trainer) -> Path:
         """Get directory for saving visualizations."""
@@ -186,7 +113,6 @@ class ValidationVisualizationCallback(Callback):
         image: torch.Tensor,
         prediction: Dict,
         target: Dict,
-        loss_info: Dict,
         title_prefix: str,
         save_path: Path = None,
         trainer = None,
@@ -195,12 +121,11 @@ class ValidationVisualizationCallback(Callback):
         """Visualize single image with predictions and ground truth."""
         from experiments.detection.visualization_utils import plot_detection_predictions
 
-        # Create visualization
+        # Create visualization (without loss_info)
         fig = plot_detection_predictions(
             image=image,
             prediction=prediction,
             target=target,
-            loss_info=loss_info,
             title=title_prefix
         )
 
@@ -241,36 +166,3 @@ class ValidationVisualizationCallback(Callback):
 
         buf.close()
         return img_tensor
-
-    def _save_metadata(
-        self,
-        save_dir: Path,
-        epoch: int,
-        per_image_losses: List[Dict],
-        best_indices: List[int],
-        worst_indices: List[int]
-    ):
-        """Save metadata JSON file."""
-        metadata = {
-            'epoch': epoch,
-            'best_images': [
-                {
-                    'rank': rank + 1,
-                    'index': idx,
-                    **per_image_losses[idx]
-                }
-                for rank, idx in enumerate(best_indices)
-            ],
-            'worst_images': [
-                {
-                    'rank': rank + 1,
-                    'index': idx,
-                    **per_image_losses[idx]
-                }
-                for rank, idx in enumerate(worst_indices)
-            ]
-        }
-
-        metadata_path = save_dir / 'metadata.json'
-        with open(metadata_path, 'w') as f:
-            json.dump(metadata, f, indent=2)

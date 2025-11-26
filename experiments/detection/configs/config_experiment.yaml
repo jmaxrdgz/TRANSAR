@@ -70,6 +70,10 @@ LOGGING:
   TENSORBOARD: true
   SAVE_TOP_K: 3
 
+# Visualization settings
+VIZ_SAMPLE_SIZE: 3  # Number of validation images to sample for visualization (reduces memory and computation)
+VIZ_EPOCH_INTERVAL: 1  # Plot validation images only every N epochs
+
 EXPERIMENT:
   NAME: yolo_detection
   VERSION: null

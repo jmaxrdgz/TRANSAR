@@ -130,6 +130,14 @@ def parse_args():
         help='Save top K checkpoints (overrides config)'
     )
 
+    # Visualization
+    parser.add_argument(
+        '--viz_epoch_interval',
+        type=int,
+        default=1,
+        help='Plot validation images only every N epochs (default: 1)'
+    )
+
     # Misc
     parser.add_argument(
         '--fast_dev_run',
@@ -187,6 +195,10 @@ def override_config(config, args):
         config.EXPERIMENT.VERSION = args.version
     if args.save_top_k is not None:
         config.LOGGING.SAVE_TOP_K = args.save_top_k
+
+    # Visualization overrides
+    if args.viz_epoch_interval is not None:
+        config.VIZ_EPOCH_INTERVAL = args.viz_epoch_interval
 
     return config
 
@@ -273,7 +285,8 @@ def main():
     viz_callback = ValidationVisualizationCallback(
         num_images=3,
         save_to_disk=True,
-        log_to_tensorboard=True
+        log_to_tensorboard=True,
+        epoch_interval=config.VIZ_EPOCH_INTERVAL
     )
     callbacks.append(viz_callback)
 
