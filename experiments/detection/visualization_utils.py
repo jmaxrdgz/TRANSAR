@@ -87,8 +87,9 @@ def plot_detection_predictions(
         title_text += f"Box: {loss_info['box_loss']:.3f} | "
         title_text += f"Obj: {loss_info['obj_loss']:.3f} | "
         title_text += f"Cls: {loss_info['cls_loss']:.3f}"
-
-    title_text += f"\nGT boxes: {len(gt_boxes)} | Pred boxes: {len(pred_boxes)}"
+        title_text += f"\nGT boxes: {len(gt_boxes)} | Pred boxes: {len(pred_boxes)}"
+    else:
+        title_text += f"\nGT boxes: {len(gt_boxes)} | Pred boxes: {len(pred_boxes)}"
 
     ax.set_title(title_text, fontsize=10)
     ax.axis('off')

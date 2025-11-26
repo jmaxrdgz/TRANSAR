@@ -271,7 +271,8 @@ def main():
 
     # Visualization callback
     viz_callback = ValidationVisualizationCallback(
-        num_images=3,
+        num_images=getattr(config, 'NUM_VIZ_IMAGES', 3),
+        seed=config.SEED,
         save_to_disk=True,
         log_to_tensorboard=True
     )
