@@ -4,6 +4,7 @@ Lightning wrapper for YOLO detector with custom timm backbones (e.g., SwinV2).
 
 import torch
 import torch.nn as nn
+import torch.distributed as dist
 import lightning as L
 from torchvision.ops import box_iou, box_convert
 from typing import Dict, List, Optional, Tuple
@@ -75,6 +76,7 @@ class YOLODetector(L.LightningModule):
 
         # Metrics
         if TORCHMETRICS_AVAILABLE:
+            # map_metric instance exists on each rank but we'll *use it only on rank 0* for compute.
             self.map_metric = MeanAveragePrecision(
                 box_format='xyxy',
                 iou_type='bbox',
@@ -83,9 +85,9 @@ class YOLODetector(L.LightningModule):
         else:
             self.map_metric = None
 
-        self.val_predictions = []
-        self.val_targets = []
-        self.val_images = []
+        # Per-rank small CPU buffers for metric aggregation (store python-lists of small dicts)
+        self._local_preds: List[Dict] = []
+        self._local_tgts: List[Dict] = []
 
     def forward(self, images, targets=None):
         if isinstance(images, list):
@@ -149,6 +151,7 @@ class YOLODetector(L.LightningModule):
                     h_grid = h / stride
 
                     gt_wh = torch.tensor([w_grid, h_grid], device=device)
+                    # note: keep current heuristic (you may consider switching to IoU-based matching later)
                     anchor_ious = torch.min(gt_wh / (anchors + 1e-9), anchors / (gt_wh + 1e-9)).min(dim=1)[0]
                     best_anchor_idx = anchor_ious.argmax()
 
@@ -168,6 +171,7 @@ class YOLODetector(L.LightningModule):
 
             pos_mask = target_obj > 0.5
             if pos_mask.sum() > 0:
+                # ensure shapes align when indexing
                 box_loss = nn.functional.mse_loss(pred_xy[pos_mask], target_boxes[..., 0:2][pos_mask], reduction='mean') + \
                            nn.functional.mse_loss(pred_wh[pos_mask], target_boxes[..., 2:4][pos_mask], reduction='mean')
                 cls_loss = nn.functional.binary_cross_entropy_with_logits(pred_cls[pos_mask], target_cls[pos_mask], reduction='mean')
@@ -199,10 +203,51 @@ class YOLODetector(L.LightningModule):
         self.log('train/cls_loss', loss_dict['cls_loss'], on_step=True, on_epoch=True, sync_dist=True)
         return loss_dict['loss']
 
+    # -------------------------------
+    # Helpers for safe serialization
+    # -------------------------------
+    def _serialize_preds(self, preds: List[Dict]) -> List[Dict]:
+        """Convert decoded_predictions (tensors) to CPU lists/dicts safe for all_gather_object."""
+        serial = []
+        for d in preds:
+            serial.append({
+                'boxes': d['boxes'].cpu().detach().tolist() if isinstance(d.get('boxes'), torch.Tensor) else d.get('boxes', []),
+                'labels': d['labels'].cpu().detach().tolist() if isinstance(d.get('labels'), torch.Tensor) else d.get('labels', []),
+                'scores': d['scores'].cpu().detach().tolist() if isinstance(d.get('scores'), torch.Tensor) else d.get('scores', []),
+            })
+        return serial
+
+    def _serialize_targets(self, tgts: List[Dict]) -> List[Dict]:
+        """Convert target dicts to CPU lists/dicts safe for all_gather_object."""
+        serial = []
+        for t in tgts:
+            serial.append({
+                'boxes': t['boxes'].cpu().detach().tolist() if isinstance(t.get('boxes'), torch.Tensor) else t.get('boxes', []),
+                'labels': t['labels'].cpu().detach().tolist() if isinstance(t.get('labels'), torch.Tensor) else t.get('labels', []),
+            })
+        return serial
+
+    def _reconstruct_tensors(self, serial_preds: List[Dict], serial_tgts: List[Dict]):
+        """Rebuild torch tensors from serialized lists (on rank 0 for metric computation)."""
+        recon_preds = []
+        recon_tgts = []
+        for d in serial_preds:
+            boxes = torch.tensor(d['boxes'], dtype=torch.float32) if len(d['boxes']) > 0 else torch.zeros((0, 4), dtype=torch.float32)
+            labels = torch.tensor(d['labels'], dtype=torch.int64) if len(d['labels']) > 0 else torch.zeros((0,), dtype=torch.int64)
+            scores = torch.tensor(d['scores'], dtype=torch.float32) if len(d['scores']) > 0 else torch.zeros((0,), dtype=torch.float32)
+            recon_preds.append({'boxes': boxes, 'labels': labels, 'scores': scores})
+        for t in serial_tgts:
+            boxes = torch.tensor(t['boxes'], dtype=torch.float32) if len(t['boxes']) > 0 else torch.zeros((0, 4), dtype=torch.float32)
+            labels = torch.tensor(t['labels'], dtype=torch.int64) if len(t['labels']) > 0 else torch.zeros((0,), dtype=torch.int64)
+            recon_tgts.append({'boxes': boxes, 'labels': labels})
+        return recon_preds, recon_tgts
+
+    # -------------------------
+    # validation_step (safe)
+    # -------------------------
     def validation_step(self, batch, batch_idx):
         images, targets = batch['images'], batch['targets']
 
-        # Compute validation loss by explicitly computing it
         if isinstance(images, list):
             images_tensor = torch.stack(images)
         else:
@@ -221,44 +266,94 @@ class YOLODetector(L.LightningModule):
         self.log('val/obj_loss', loss_dict['obj_loss'], on_step=False, on_epoch=True, sync_dist=True)
         self.log('val/cls_loss', loss_dict['cls_loss'], on_step=False, on_epoch=True, sync_dist=True)
 
-        # Run inference for metrics
         with torch.no_grad():
             decoded_predictions = self.detection_head.decode_predictions(
                 predictions,
                 conf_threshold=self.conf_threshold,
                 nms_threshold=self.nms_threshold
             )
-        if TORCHMETRICS_AVAILABLE and self.map_metric is not None:
-            self.map_metric.update(decoded_predictions, targets)
-        self.val_predictions.extend(decoded_predictions)
-        self.val_targets.extend(targets)
-        self.val_images.extend([img.cpu() for img in images_tensor])
 
+        # Convert to small CPU-serializable objects and store locally (per-rank)
+        cpu_preds = self._serialize_preds(decoded_predictions)
+        cpu_tgts = self._serialize_targets(targets)
+
+        # Append to local per-rank buffers
+        self._local_preds.extend(cpu_preds)
+        self._local_tgts.extend(cpu_tgts)
+
+    # ---------------------------------------
+    # on_validation_epoch_end (DDP-safe)
+    # ---------------------------------------
     def on_validation_epoch_end(self):
-        if len(self.val_predictions) == 0:
-            return
+        """
+        Gather per-rank serialized preds/tgts using all_gather_object and compute metrics on rank 0 only.
+        """
+        # Gather across ranks if distributed
+        if dist.is_available() and dist.is_initialized() and dist.get_world_size() > 1:
+            world_size = dist.get_world_size()
+            rank = dist.get_rank()
 
-        if TORCHMETRICS_AVAILABLE and self.map_metric is not None:
-            metric_dict = self.map_metric.compute()
-            map_50 = float(metric_dict.get('map_50', 0.0))
-            map_75 = float(metric_dict.get('map_75', 0.0))
-            map_50_95 = float(metric_dict.get('map', 0.0))
-            self.map_metric.reset()
+            preds_gather_list = [None for _ in range(world_size)]
+            tgts_gather_list = [None for _ in range(world_size)]
+
+            # gather per-rank lists (python objects)
+            dist.all_gather_object(preds_gather_list, self._local_preds)
+            dist.all_gather_object(tgts_gather_list, self._local_tgts)
+
+            # flatten
+            gathered_preds = [p for rank_list in preds_gather_list for p in (rank_list or [])]
+            gathered_tgts = [t for rank_list in tgts_gather_list for t in (rank_list or [])]
         else:
-            map_50 = map_75 = map_50_95 = 0.0
+            # single-process: use local buffers
+            gathered_preds = list(self._local_preds)
+            gathered_tgts = list(self._local_tgts)
+            rank = 0
 
-        f1, precision, recall = self._compute_f1(self.val_predictions, self.val_targets)
+        # clear local buffers on all ranks to free memory
+        self._local_preds = []
+        self._local_tgts = []
 
-        self.log('val/mAP_50', map_50, prog_bar=True, sync_dist=True)
-        self.log('val/mAP_75', map_75, sync_dist=True)
-        self.log('val/mAP_50_95', map_50_95, prog_bar=True, sync_dist=True)
-        self.log('val/F1', f1, prog_bar=True, sync_dist=True)
-        self.log('val/precision', precision, sync_dist=True)
-        self.log('val/recall', recall, sync_dist=True)
+        # Only rank 0 computes heavy metrics and logs them
+        if rank == 0:
+            recon_preds, recon_tgts = self._reconstruct_tensors(gathered_preds, gathered_tgts)
 
-        self.val_predictions = []
-        self.val_targets = []
-        self.val_images = []
+            # Compute mAP with existing self.map_metric instance (if available)
+            if TORCHMETRICS_AVAILABLE and self.map_metric is not None:
+                # update existing metric instance with merged predictions/targets
+                # ensure metric is clean
+                try:
+                    self.map_metric.reset()
+                except Exception:
+                    # Some torchmetrics versions may not have reset; recreate if needed
+                    self.map_metric = MeanAveragePrecision(box_format='xyxy', iou_type='bbox', class_metrics=False)
+
+                # torchmetrics expects lists of dicts where boxes/labels/scores are tensors
+                for pred, tgt in zip(recon_preds, recon_tgts):
+                    self.map_metric.update([pred], [tgt])
+
+                metric_dict = self.map_metric.compute()
+                # reset to be safe for next epoch
+                try:
+                    self.map_metric.reset()
+                except Exception:
+                    pass
+
+                map_50 = float(metric_dict.get('map_50', 0.0))
+                map_75 = float(metric_dict.get('map_75', 0.0))
+                map_50_95 = float(metric_dict.get('map', 0.0))
+            else:
+                map_50 = map_75 = map_50_95 = 0.0
+
+            # Compute F1/precision/recall (uses tensor inputs)
+            f1, precision, recall = self._compute_f1(recon_preds, recon_tgts)
+
+            # Log metrics from rank 0 only (no sync_dist)
+            self.log('val/mAP_50', map_50, prog_bar=True)
+            self.log('val/mAP_75', map_75)
+            self.log('val/mAP_50_95', map_50_95, prog_bar=True)
+            self.log('val/F1', f1, prog_bar=True)
+            self.log('val/precision', precision)
+            self.log('val/recall', recall)
 
     def _compute_f1(self, predictions: List[Dict], targets: List[Dict], iou_threshold: float = 0.5):
         total_tp = total_fp = total_fn = 0
