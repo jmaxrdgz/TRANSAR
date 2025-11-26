@@ -241,6 +241,14 @@ class YOLODetector(L.LightningModule):
             labels = torch.tensor(t['labels'], dtype=torch.int64) if len(t['labels']) > 0 else torch.zeros((0,), dtype=torch.int64)
             recon_tgts.append({'boxes': boxes, 'labels': labels})
         return recon_preds, recon_tgts
+    
+    def _get_cpu_gloo_group(self):
+        if not hasattr(self, "_cpu_gloo_group"):
+            if dist.get_backend() != "gloo":
+                self._cpu_gloo_group = dist.new_group(backend="gloo")
+            else:
+                self._cpu_gloo_group = dist.group.WORLD
+        return self._cpu_gloo_group
 
     # -------------------------
     # validation_step (safe)
@@ -285,10 +293,6 @@ class YOLODetector(L.LightningModule):
     # on_validation_epoch_end (DDP-safe)
     # ---------------------------------------
     def on_validation_epoch_end(self):
-        """
-        Gather per-rank serialized preds/tgts using all_gather_object and compute metrics on rank 0 only.
-        """
-        # Gather across ranks if distributed
         if dist.is_available() and dist.is_initialized() and dist.get_world_size() > 1:
             world_size = dist.get_world_size()
             rank = dist.get_rank()
@@ -296,47 +300,31 @@ class YOLODetector(L.LightningModule):
             preds_gather_list = [None for _ in range(world_size)]
             tgts_gather_list = [None for _ in range(world_size)]
 
-            # gather per-rank lists (python objects)
-            dist.all_gather_object(preds_gather_list, self._local_preds)
-            dist.all_gather_object(tgts_gather_list, self._local_tgts)
+            cpu_group = self._get_cpu_gloo_group()
 
-            # flatten
+            dist.all_gather_object(preds_gather_list, self._local_preds, group=cpu_group)
+            dist.all_gather_object(tgts_gather_list, self._local_tgts, group=cpu_group)
+
             gathered_preds = [p for rank_list in preds_gather_list for p in (rank_list or [])]
             gathered_tgts = [t for rank_list in tgts_gather_list for t in (rank_list or [])]
         else:
-            # single-process: use local buffers
             gathered_preds = list(self._local_preds)
             gathered_tgts = list(self._local_tgts)
             rank = 0
 
-        # clear local buffers on all ranks to free memory
         self._local_preds = []
         self._local_tgts = []
 
-        # Only rank 0 computes heavy metrics and logs them
         if rank == 0:
             recon_preds, recon_tgts = self._reconstruct_tensors(gathered_preds, gathered_tgts)
 
-            # Compute mAP with existing self.map_metric instance (if available)
             if TORCHMETRICS_AVAILABLE and self.map_metric is not None:
-                # update existing metric instance with merged predictions/targets
-                # ensure metric is clean
-                try:
-                    self.map_metric.reset()
-                except Exception:
-                    # Some torchmetrics versions may not have reset; recreate if needed
-                    self.map_metric = MeanAveragePrecision(box_format='xyxy', iou_type='bbox', class_metrics=False)
-
-                # torchmetrics expects lists of dicts where boxes/labels/scores are tensors
+                self.map_metric.reset()
                 for pred, tgt in zip(recon_preds, recon_tgts):
                     self.map_metric.update([pred], [tgt])
 
                 metric_dict = self.map_metric.compute()
-                # reset to be safe for next epoch
-                try:
-                    self.map_metric.reset()
-                except Exception:
-                    pass
+                self.map_metric.reset()
 
                 map_50 = float(metric_dict.get('map_50', 0.0))
                 map_75 = float(metric_dict.get('map_75', 0.0))
@@ -344,10 +332,8 @@ class YOLODetector(L.LightningModule):
             else:
                 map_50 = map_75 = map_50_95 = 0.0
 
-            # Compute F1/precision/recall (uses tensor inputs)
             f1, precision, recall = self._compute_f1(recon_preds, recon_tgts)
 
-            # Log metrics from rank 0 only (no sync_dist)
             self.log('val/mAP_50', map_50, prog_bar=True)
             self.log('val/mAP_75', map_75)
             self.log('val/mAP_50_95', map_50_95, prog_bar=True)
