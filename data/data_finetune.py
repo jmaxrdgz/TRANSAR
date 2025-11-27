@@ -236,14 +236,14 @@ def build_dataloaders(config):
     train_dataset = SIVEDDataset(
         root_dir=config.DATA.DATA_PATH,
         split="train",
-        num_classes=config.DATA.NUM_CLASS,
+        num_classes=config.DATA.NUM_CLASS if hasattr(config.DATA, 'NUM_CLASS') else None,
         transform=train_transform
     )
     # Share class mapping from train to val for consistency
     val_dataset = SIVEDDataset(
         root_dir=config.DATA.DATA_PATH,
         split="valid",
-        num_classes=config.DATA.NUM_CLASS,
+        num_classes=config.DATA.NUM_CLASS if hasattr(config.DATA, 'NUM_CLASS') else None,
         transform=val_transform,
         class_mapping=train_dataset.class_mapping
     )
@@ -526,29 +526,33 @@ class SIVEDDataset(Dataset):
 def yolo_collate_fn(batch):
     """
     Custom collate function for batching YOLO-style data.
-    Since each image can have different number of boxes, we keep them as lists.
+
+    Converts SIVED format to YOLODetector expected format:
+    - Combines boxes and labels into target dicts
+    - Keeps boxes in normalized [0,1] format
 
     Returns:
         Dictionary with:
-            - image: Tensor [B, 1, H, W] - batch of single-channel SAR images
-            - boxes: List[Tensor] - list of [N_i, 4] normalized bbox tensors
-            - labels: List[Tensor] - list of [N_i] class ID tensors
-            - difficulties: List[Tensor] - list of [N_i] difficulty flag tensors
+            - images: Tensor [B, 1, H, W] - batch of single-channel SAR images
+            - targets: List[Dict] - list of dicts with 'boxes' [N_i,4] and 'labels' [N_i]
             - image_id: Tensor [B] - sample indices
             - orig_size: Tensor [B, 2] - original image sizes (H, W)
     """
     images = torch.stack([item["image"] for item in batch])
-    boxes = [item["boxes"] for item in batch]
-    labels = [item["labels"] for item in batch]
-    difficulties = [item["difficulties"] for item in batch]
     image_ids = torch.tensor([item["image_id"] for item in batch])
     orig_sizes = torch.stack([item["orig_size"] for item in batch])
 
+    # Build targets in expected format: List[Dict]
+    targets = []
+    for item in batch:
+        targets.append({
+            'boxes': item["boxes"],    # [N, 4] normalized [x_center, y_center, w, h] in [0,1]
+            'labels': item["labels"]   # [N]
+        })
+
     return {
-        "image": images,          # Tensor [B, 1, H, W]
-        "boxes": boxes,           # List of [N_i, 4] tensors
-        "labels": labels,         # List of [N_i] tensors
-        "difficulties": difficulties,  # List of [N_i] tensors
+        "images": images,         # Tensor [B, 1, H, W]
+        "targets": targets,       # List[Dict] with 'boxes' and 'labels'
         "image_id": image_ids,    # Tensor [B]
         "orig_size": orig_sizes   # Tensor [B, 2]
     }
