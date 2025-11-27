@@ -115,6 +115,79 @@ class RandomGammaAdjustment:
         return Image.fromarray(img_array, mode='L')
 
 
+class RandomHorizontalFlipWithBoxes:
+    """
+    Random horizontal flip for images with YOLO-format bounding boxes.
+
+    Applies horizontal flip to both image and boxes with probability p.
+    Boxes are in normalized YOLO format: [x_center, y_center, width, height]
+
+    For horizontal flip:
+        x_center_new = 1.0 - x_center_old
+        y_center, width, height remain unchanged
+
+    Args:
+        p: Probability of applying flip (default: 0.5)
+    """
+    def __init__(self, p=0.5):
+        self.p = p
+
+    def __call__(self, sample):
+        """
+        Apply flip to image and boxes.
+
+        Args:
+            sample: Dict with keys 'image' (PIL Image), 'boxes' (Tensor [N, 4])
+
+        Returns:
+            sample: Dict with flipped image and transformed boxes
+        """
+        if np.random.random() < self.p:
+            # Flip the image
+            sample['image'] = T.functional.hflip(sample['image'])
+
+            # Transform boxes if there are any
+            if len(sample['boxes']) > 0:
+                boxes = sample['boxes'].clone()
+                # Flip x_center: x_new = 1.0 - x_old
+                boxes[:, 0] = 1.0 - boxes[:, 0]
+                sample['boxes'] = boxes
+
+        return sample
+
+
+class ImageOnlyTransform:
+    """
+    Wrapper for transforms that only operate on images.
+    Passes through boxes and other metadata unchanged.
+
+    This allows existing image-only transforms (ColorJitter, Gamma, Normalization)
+    to work in a dict-based transform pipeline.
+    """
+    def __init__(self, transform):
+        self.transform = transform
+
+    def __call__(self, sample):
+        sample['image'] = self.transform(sample['image'])
+        return sample
+
+
+class ComposeWithBoxes:
+    """
+    Compose transforms that operate on dict samples with images and boxes.
+
+    Compatible with both dict-based transforms (that modify boxes)
+    and image-only transforms (wrapped in ImageOnlyTransform).
+    """
+    def __init__(self, transforms):
+        self.transforms = transforms
+
+    def __call__(self, sample):
+        for t in self.transforms:
+            sample = t(sample)
+        return sample
+
+
 def build_dataloaders(config):
     """
     Build train and validation dataloaders with augmentations from TRANSAR paper.
@@ -135,24 +208,28 @@ def build_dataloaders(config):
     s_norm = getattr(config.DATA, 'SAR_NORM_SCALE', None)  # None by default, 16 for Capella
     global_std = getattr(config.DATA, 'GLOBAL_STD', None)  # Pre-computed from training data
 
-    train_transform = T.Compose([
-        T.Resize((config.MODEL.IN_SIZE, config.MODEL.IN_SIZE), interpolation=InterpolationMode.BICUBIC),
+    train_transform = ComposeWithBoxes([
+        # Spatial transforms
+        ImageOnlyTransform(T.Resize((config.MODEL.IN_SIZE, config.MODEL.IN_SIZE), interpolation=InterpolationMode.BICUBIC)),
+
+        # Geometric augmentations (NEW! Now with proper bbox transformation)
+        RandomHorizontalFlipWithBoxes(p=0.5),
+
         # Radiometric augmentations (safe - don't affect box coordinates)
-        T.ColorJitter(
+        ImageOnlyTransform(T.ColorJitter(
             brightness=0.2,  # Random brightness adjustment
             contrast=0.2,    # Random contrast adjustment
-        ),
-        RandomGammaAdjustment(gamma_range=(0.8, 1.2)),
-        # NOTE: RandomHorizontalFlip removed - requires bbox transformation
-        # T.RandomHorizontalFlip(p=0.5) would need to flip x coords: x_new = 1 - x_old
-        # SAR-specific normalization
+        )),
+        ImageOnlyTransform(RandomGammaAdjustment(gamma_range=(0.8, 1.2))),
+
+        # SAR-specific normalization (applied last)
         # NOTE: remove if using MGF
-        SARNormalization(s_norm=s_norm, global_std=global_std),
+        ImageOnlyTransform(SARNormalization(s_norm=s_norm, global_std=global_std)),
     ])
 
-    val_transform = T.Compose([
-        T.Resize((config.MODEL.IN_SIZE, config.MODEL.IN_SIZE), interpolation=InterpolationMode.BICUBIC),
-        SARNormalization(s_norm=s_norm, global_std=global_std),
+    val_transform = ComposeWithBoxes([
+        ImageOnlyTransform(T.Resize((config.MODEL.IN_SIZE, config.MODEL.IN_SIZE), interpolation=InterpolationMode.BICUBIC)),
+        ImageOnlyTransform(SARNormalization(s_norm=s_norm, global_std=global_std)),
     ])
 
     # Create datasets
@@ -426,9 +503,15 @@ class SIVEDDataset(Dataset):
         labels = torch.tensor(labels, dtype=torch.int64) if labels else torch.zeros((0,), dtype=torch.int64)
         difficulties = torch.tensor(difficulties, dtype=torch.bool) if difficulties else torch.zeros((0,), dtype=torch.bool)
 
-        # If using torchvision transforms, apply to image only
+        # Apply transforms to both image and boxes
         if self.transform is not None:
-            img = self.transform(img)
+            sample = {
+                'image': img,
+                'boxes': boxes
+            }
+            sample = self.transform(sample)
+            img = sample['image']
+            boxes = sample['boxes']
 
         return {
             "image": img,           # Tensor [1, H, W] - single-channel SAR image
