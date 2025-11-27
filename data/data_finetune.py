@@ -242,7 +242,7 @@ def build_dataloaders(config):
     # Share class mapping from train to val for consistency
     val_dataset = SIVEDDataset(
         root_dir=config.DATA.DATA_PATH,
-        split="val",
+        split="valid",
         num_classes=config.DATA.NUM_CLASS,
         transform=val_transform,
         class_mapping=train_dataset.class_mapping
