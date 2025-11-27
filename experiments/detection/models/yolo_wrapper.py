@@ -130,12 +130,16 @@ class YOLODetector(L.LightningModule):
                 if len(targets[b]['boxes']) == 0:
                     continue
 
-                gt_boxes = targets[b]['boxes']
+                gt_boxes_norm = targets[b]['boxes']  # [N, 4] normalized [cx, cy, w, h] in [0,1]
                 gt_labels = targets[b]['labels']
-                gt_boxes_cxcywh = box_convert(gt_boxes, 'xyxy', 'cxcywh')
 
-                for gt_idx in range(len(gt_boxes)):
-                    cx, cy, w, h = gt_boxes_cxcywh[gt_idx]
+                for gt_idx in range(len(gt_boxes_norm)):
+                    # Convert normalized to absolute
+                    cx_norm, cy_norm, w_norm, h_norm = gt_boxes_norm[gt_idx]
+                    cx = cx_norm * image_size[1]  # width
+                    cy = cy_norm * image_size[0]  # height
+                    w = w_norm * image_size[1]
+                    h = h_norm * image_size[0]
                     gt_label = gt_labels[gt_idx]
 
                     assert 0 <= gt_label < self.detection_head.num_classes
