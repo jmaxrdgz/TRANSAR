@@ -1,0 +1,18 @@
+# Ultralytics YOLO data configuration for SIVED dataset
+# SAR Images for Vessel Detection
+
+# Dataset root directory (absolute path)
+path: /Users/jean-max/Documents/Projets/TRANSAR/dataset/supervised/SIVED/ImageSets
+
+# Train/val/test sets (relative to 'path')
+# Images are in images/{split}/, labels are in labelTxt/{split}/
+train: images/train
+val: images/valid
+test: images/test
+
+# Number of classes
+nc: 1
+
+# Class names
+names:
+  0: vehicule

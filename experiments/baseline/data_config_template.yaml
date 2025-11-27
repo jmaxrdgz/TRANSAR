@@ -1,0 +1,17 @@
+# Ultralytics YOLO data configuration file
+# This file defines the dataset structure for training
+
+# Dataset root directory (relative to this file or absolute path)
+path: ../../dataset/supervised/SIVED
+
+# Train/val/test sets (relative to 'path')
+train: ImageSets/train.txt  # List of training image paths
+val: ImageSets/valid.txt    # List of validation image paths
+test: ImageSets/test.txt    # List of test image paths (optional)
+
+# Number of classes
+nc: 1
+
+# Class names
+names:
+  0: vehicule
