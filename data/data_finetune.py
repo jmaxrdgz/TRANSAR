@@ -1,6 +1,7 @@
 import os
 from torch.utils.data import Dataset, DataLoader
 from torchvision import transforms as T
+from torchvision.transforms import InterpolationMode
 from PIL import Image
 import torch
 from typing import Dict, List
@@ -33,18 +34,41 @@ class SARNormalization:
         """
         self.s_norm = s_norm
         self.global_std = global_std
+        self._logged = False  # Flag to log normalization config only once
+
+    def _log_normalization_config(self):
+        """Log the normalization configuration once for debugging purposes."""
+        if not self._logged:
+            norm_type = []
+            if self.s_norm is not None:
+                norm_type.append(f"log2 scaling (s_norm={self.s_norm})")
+            else:
+                norm_type.append("no log scaling")
+
+            if self.global_std is not None:
+                norm_type.append(f"global std (σ={self.global_std:.4f})")
+            else:
+                norm_type.append("per-chip std")
+
+            print(f"[SARNormalization] Using: {' + '.join(norm_type)}")
+            print(f"[SARNormalization] Formula: x_norm = (x - μ_chip) / σ")
+            self._logged = True
 
     def __call__(self, img):
         """
         Apply normalization to SAR image.
 
         Args:
-            img: PIL Image or torch Tensor [C, H, W] in range [0, 1] or [0, 255]
+            img: PIL Image (grayscale) or torch Tensor [1, H, W] in range [0, 1] or [0, 255]
 
         Returns:
-            Normalized tensor
+            Normalized tensor [1, H, W]
         """
+        # Log normalization config on first call
+        self._log_normalization_config()
+
         if isinstance(img, Image.Image):
+            # Convert PIL grayscale image to tensor [1, H, W]
             img = T.ToTensor()(img)
 
         # Convert to float if needed
@@ -73,7 +97,7 @@ class SARNormalization:
 
 
 class RandomGammaAdjustment:
-    """Radiometric augmentation: random gamma correction."""
+    """Radiometric augmentation: random gamma correction for grayscale images."""
     def __init__(self, gamma_range=(0.8, 1.2)):
         self.gamma_range = gamma_range
 
@@ -83,11 +107,12 @@ class RandomGammaAdjustment:
             img = T.ToPILImage()(img)
 
         gamma = np.random.uniform(*self.gamma_range)
-        # Apply gamma correction
+        # Apply gamma correction to grayscale image
         img_array = np.array(img).astype(np.float32) / 255.0
         img_array = np.power(img_array, gamma)
         img_array = (img_array * 255.0).clip(0, 255).astype(np.uint8)
-        return Image.fromarray(img_array)
+        # Return grayscale PIL image (mode 'L')
+        return Image.fromarray(img_array, mode='L')
 
 
 def build_dataloaders(config):
@@ -110,36 +135,40 @@ def build_dataloaders(config):
     s_norm = getattr(config.DATA, 'SAR_NORM_SCALE', None)  # None by default, 16 for Capella
     global_std = getattr(config.DATA, 'GLOBAL_STD', None)  # Pre-computed from training data
 
-    # Training augmentations (radiometric only - safe without box transformation)
     train_transform = T.Compose([
-        T.Resize((config.MODEL.IN_SIZE, config.MODEL.IN_SIZE)),
+        T.Resize((config.MODEL.IN_SIZE, config.MODEL.IN_SIZE), interpolation=InterpolationMode.BICUBIC),
         # Radiometric augmentations (safe - don't affect box coordinates)
         T.ColorJitter(
             brightness=0.2,  # Random brightness adjustment
             contrast=0.2,    # Random contrast adjustment
         ),
         RandomGammaAdjustment(gamma_range=(0.8, 1.2)),
+        # NOTE: RandomHorizontalFlip removed - requires bbox transformation
+        # T.RandomHorizontalFlip(p=0.5) would need to flip x coords: x_new = 1 - x_old
         # SAR-specific normalization
+        # NOTE: remove if using MGF
         SARNormalization(s_norm=s_norm, global_std=global_std),
     ])
 
     val_transform = T.Compose([
-        T.Resize((config.MODEL.IN_SIZE, config.MODEL.IN_SIZE)),
+        T.Resize((config.MODEL.IN_SIZE, config.MODEL.IN_SIZE), interpolation=InterpolationMode.BICUBIC),
         SARNormalization(s_norm=s_norm, global_std=global_std),
     ])
 
     # Create datasets
-    train_dataset = SARDetYoloDataset(
+    train_dataset = SIVEDDataset(
         root_dir=config.DATA.DATA_PATH,
         split="train",
         num_classes=config.DATA.NUM_CLASS,
         transform=train_transform
     )
-    val_dataset = SARDetYoloDataset(
+    # Share class mapping from train to val for consistency
+    val_dataset = SIVEDDataset(
         root_dir=config.DATA.DATA_PATH,
         split="val",
         num_classes=config.DATA.NUM_CLASS,
-        transform=val_transform
+        transform=val_transform,
+        class_mapping=train_dataset.class_mapping
     )
 
     # Create DataLoaders
@@ -168,28 +197,41 @@ def build_dataloaders(config):
 #-------------
 #   Dataset  
 #-------------
-class SARDetYoloDataset(Dataset):
+# NOTE: Fix binary vs multi-class handling in SIVEDDataset
+class SIVEDDataset(Dataset):
     """
-    Dataset for YOLO-style structure of SARDet-100k:
-    dataset/
-      images/{split}/image_name.jpg
-      labels/{split}/image_name.txt
+    SIVED dataset for object detection in PascalVOC format.
+
+    Each image file is 512x512 grayscale JPEG (loaded as single-channel).
 
     Each label file contains:
-        class_id x_center y_center width height
-    (normalized coordinates in [0,1])
+        x1 y1 x2 y2 x3 y3 x4 y4 class_name difficulty
+    where:
+        - x1 y1 x2 y2 x3 y3 x4 y4: absolute rotated bbox coordinates
+        - class_name: string name of the class
+        - difficulty: boolean flag (0 or 1) indicating if the example is difficult to predict
+
+    Returns:
+        Dictionary with:
+            - image: Tensor [1, H, W] - single-channel SAR image
+            - boxes: Tensor [N, 4] - normalized YOLO boxes (x_center, y_center, width, height)
+            - labels: Tensor [N] - class IDs
+            - difficulties: Tensor [N] - difficulty flags
+            - image_id: int - sample index
+            - orig_size: Tensor [2] - original image size (H, W)
     """
 
-    def __init__(self, root_dir, split="train", num_classes=None, transform=None):
+    def __init__(self, root_dir, split="train", num_classes=None, transform=None, class_mapping=None):
         self.root_dir = root_dir
         self.split = split
         self.transform = transform
-        self.num_classes = num_classes  # Store before computing samples
+        self.num_classes = num_classes
+
+        self.class_mapping = {} if class_mapping is None else dict(class_mapping)
 
         self.img_dir = os.path.join(root_dir, "images", split)
-        self.lbl_dir = os.path.join(root_dir, "labels", split)
+        self.lbl_dir = os.path.join(root_dir, "labelTxt", split)
 
-        # Verify directories exist
         if not os.path.exists(self.img_dir):
             raise FileNotFoundError(f"Image directory not found: {self.img_dir}")
         if not os.path.exists(self.lbl_dir):
@@ -203,47 +245,84 @@ class SARDetYoloDataset(Dataset):
         if len(self.img_files) == 0:
             raise ValueError(f"No images found in {self.img_dir}")
 
-        self.num_classes = num_classes
         self.samples = []
+        next_class_id = len(self.class_mapping)
 
+        # Build class mapping and samples list simultaneously
         for f in self.img_files:
             img_path = os.path.join(self.img_dir, f)
             label_path = os.path.join(self.lbl_dir, os.path.splitext(f)[0] + ".txt")
 
             labels = []
+
             if os.path.exists(label_path):
                 with open(label_path, "r") as lf:
                     for line in lf:
                         line = line.strip()
-                        if not line:  # Skip empty lines
+                        if not line:
                             continue
+
                         parts = line.split()
-                        if len(parts) >= 1:
-                            try:
-                                cls_id = int(parts[0])
-                                labels.append(cls_id)
-                            except ValueError:
-                                print(f"Warning: Invalid class ID in {label_path}: {line}")
-                                continue
-            
-            # Save sample representation
-            self.samples.append({"image": img_path, "labels": labels})
+                        if len(parts) < 10:
+                            print(f"Warning: Invalid label format in {label_path}: {line}")
+                            continue
 
-        # Infer num_classes if not given
+                        class_name = parts[8]
+
+                        # Dynamic mapping creation
+                        if class_name not in self.class_mapping:
+                            self.class_mapping[class_name] = next_class_id
+                            next_class_id += 1
+
+                        labels.append(self.class_mapping[class_name])
+
+            self.samples.append({
+                "image": img_path,
+                "labels": labels
+            })
+
+        if class_mapping is None:
+            print(f"[Dataset] Built class mapping with {len(self.class_mapping)} classes: {self.class_mapping}")
+
+        # Infer num_classes if not provided
         if self.num_classes is None:
-            all_labels = [l for s in self.samples for l in s["labels"]]
-            self.num_classes = (max(all_labels) + 1) if all_labels else 1
+            self.num_classes = len(self.class_mapping) if self.class_mapping else 1
 
-        # Check if binary classification mode
-        self.is_binary = (self.num_classes == 2)
+        self.is_binary = (self.num_classes == 1)
 
         if self.is_binary:
             print(f"[Dataset] Binary classification mode: all objects mapped to foreground (class 1)")
+
         else:
             print(f"[Dataset] Multi-class mode: {self.num_classes} classes")
 
     def __len__(self):
         return len(self.samples)
+
+    def _rotated_to_xywhn(self, x1, y1, x2, y2, x3, y3, x4, y4, img_width, img_height):
+        """
+        Convert rotated bbox (4 corner points) to normalized axis-aligned bbox.
+
+        Args:
+            x1, y1, x2, y2, x3, y3, x4, y4: Absolute pixel coordinates of 4 corners
+            img_width, img_height: Image dimensions for normalization
+
+        Returns:
+            Normalized [x_center, y_center, width, height] in range [0, 1]
+        """
+        # Get axis-aligned bounding box from rotated box
+        x_coords = [x1, x2, x3, x4]
+        y_coords = [y1, y2, y3, y4]
+        x_min, x_max = min(x_coords), max(x_coords)
+        y_min, y_max = min(y_coords), max(y_coords)
+
+        # Convert to normalized YOLO format (center_x, center_y, width, height)
+        x_center = ((x_min + x_max) / 2) / img_width
+        y_center = ((y_min + y_max) / 2) / img_height
+        width = (x_max - x_min) / img_width
+        height = (y_max - y_min) / img_height
+
+        return [x_center, y_center, width, height]
 
     def _map_labels_to_binary(self, labels: torch.Tensor) -> torch.Tensor:
         """
@@ -299,18 +378,19 @@ class SARDetYoloDataset(Dataset):
         s = self.samples[idx]
         img_path = s["image"]
 
-        # Load image
-        img = Image.open(img_path).convert("RGB")
+        # Load image as grayscale (SAR images are single-channel)
+        img = Image.open(img_path).convert("L")
         W, H = img.size
 
         # Load YOLO boxes
         label_path = os.path.join(
-            self.lbl_dir, 
+            self.lbl_dir,
             os.path.splitext(os.path.basename(img_path))[0] + ".txt"
         )
         boxes = []
         labels = []
-        
+        difficulties = []
+
         if os.path.exists(label_path):
             with open(label_path, "r") as f:
                 for line in f:
@@ -318,30 +398,45 @@ class SARDetYoloDataset(Dataset):
                     if not line:  # Skip empty lines
                         continue
                     parts = line.split()
-                    if len(parts) == 5:
+                    # Format: x1 y1 x2 y2 x3 y3 x4 y4 class_name difficulty
+                    if len(parts) >= 10:
                         try:
-                            cls, x, y, w, h = map(float, parts)
-                            boxes.append([x, y, w, h])  # normalized coords
-                            labels.append(int(cls))
-                        except ValueError:
+                            # Parse rotated bbox coordinates (absolute pixels)
+                            x1, y1, x2, y2, x3, y3, x4, y4 = map(float, parts[:8])
+                            class_name = parts[8]
+                            difficulty = int(parts[9])
+
+                            # Map class name to ID
+                            cls_id = self.class_mapping.get(class_name)
+                            if cls_id is None:
+                                print(f"Warning: Unknown class name '{class_name}' in {label_path}")
+                                continue
+
+                            # Convert to normalized axis-aligned bbox
+                            box = self._rotated_to_xywhn(x1, y1, x2, y2, x3, y3, x4, y4, W, H)
+                            boxes.append(box)
+                            labels.append(cls_id)
+                            difficulties.append(difficulty)
+                        except (ValueError, IndexError):
                             print(f"Warning: Invalid box format in {label_path}: {line}")
                             continue
 
         # Convert to tensors for Lightning compatibility
         boxes = torch.tensor(boxes, dtype=torch.float32) if boxes else torch.zeros((0, 4), dtype=torch.float32)
         labels = torch.tensor(labels, dtype=torch.int64) if labels else torch.zeros((0,), dtype=torch.int64)
+        difficulties = torch.tensor(difficulties, dtype=torch.bool) if difficulties else torch.zeros((0,), dtype=torch.bool)
 
-        # Apply transforms (should be applied BEFORE converting boxes if using albumentations)
         # If using torchvision transforms, apply to image only
         if self.transform is not None:
             img = self.transform(img)
 
         return {
-            "image": img,           # Tensor ready for model
-            "boxes": boxes,         # Tensor [N, 4] normalized YOLO boxes (x, y, w, h)
+            "image": img,           # Tensor [1, H, W] - single-channel SAR image
+            "boxes": boxes,         # Tensor [N, 4] normalized YOLO boxes (x_center, y_center, width, height)
             "labels": labels,       # Tensor [N] class IDs
-            "image_id": idx,        # Use image_id instead of idx for clarity
-            "orig_size": torch.tensor([H, W], dtype=torch.int64)  # Original image size
+            "difficulties": difficulties,  # Tensor [N] difficulty flags (bool)
+            "image_id": idx,        # Sample index
+            "orig_size": torch.tensor([H, W], dtype=torch.int64)  # Original image size (H, W)
         }
 
 
@@ -349,17 +444,28 @@ def yolo_collate_fn(batch):
     """
     Custom collate function for batching YOLO-style data.
     Since each image can have different number of boxes, we keep them as lists.
+
+    Returns:
+        Dictionary with:
+            - image: Tensor [B, 1, H, W] - batch of single-channel SAR images
+            - boxes: List[Tensor] - list of [N_i, 4] normalized bbox tensors
+            - labels: List[Tensor] - list of [N_i] class ID tensors
+            - difficulties: List[Tensor] - list of [N_i] difficulty flag tensors
+            - image_id: Tensor [B] - sample indices
+            - orig_size: Tensor [B, 2] - original image sizes (H, W)
     """
     images = torch.stack([item["image"] for item in batch])
     boxes = [item["boxes"] for item in batch]
     labels = [item["labels"] for item in batch]
+    difficulties = [item["difficulties"] for item in batch]
     image_ids = torch.tensor([item["image_id"] for item in batch])
     orig_sizes = torch.stack([item["orig_size"] for item in batch])
-    
+
     return {
-        "image": images,
-        "boxes": boxes,           # List of tensors
-        "labels": labels,         # List of tensors
-        "image_id": image_ids,
-        "orig_size": orig_sizes
+        "image": images,          # Tensor [B, 1, H, W]
+        "boxes": boxes,           # List of [N_i, 4] tensors
+        "labels": labels,         # List of [N_i] tensors
+        "difficulties": difficulties,  # List of [N_i] tensors
+        "image_id": image_ids,    # Tensor [B]
+        "orig_size": orig_sizes   # Tensor [B, 2]
     }
