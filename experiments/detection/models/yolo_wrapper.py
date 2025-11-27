@@ -11,13 +11,7 @@ from typing import Dict, List, Optional, Tuple
 from .backbone_adapter import TimmBackboneAdapter
 from .yolo_head import build_yolo_head
 
-# Try to use torchmetrics for more robust metric computation
-try:
-    from torchmetrics.detection import MeanAveragePrecision
-    TORCHMETRICS_AVAILABLE = True
-except ImportError:
-    TORCHMETRICS_AVAILABLE = False
-    print("Warning: torchmetrics not available, using custom mAP implementation")
+from torchmetrics.detection import MeanAveragePrecision
 
 
 class YOLODetector(L.LightningModule):
@@ -74,14 +68,11 @@ class YOLODetector(L.LightningModule):
         self.nms_threshold = getattr(config.MODEL, 'NMS_THRESHOLD', 0.45)
 
         # Metrics
-        if TORCHMETRICS_AVAILABLE:
-            self.map_metric = MeanAveragePrecision(
-                box_format='xyxy',
-                iou_type='bbox',
-                class_metrics=False
-            )
-        else:
-            self.map_metric = None
+        self.map_metric = MeanAveragePrecision(
+            box_format='xyxy',
+            iou_type='bbox',
+            class_metrics=False
+        )
 
         self.val_predictions = []
         self.val_targets = []
@@ -110,89 +101,114 @@ class YOLODetector(L.LightningModule):
 
     def compute_loss(self, predictions: List[torch.Tensor], targets: List[Dict], image_size: Tuple[int, int]):
         device = predictions[0].device
-        batch_size = predictions[0].shape[0]
+        bs = predictions[0].shape[0]
+        num_classes = self.detection_head.num_classes
 
-        total_box_loss = 0.0
-        total_obj_loss = 0.0
-        total_cls_loss = 0.0
+        total_box_loss = 0.
+        total_obj_loss = 0.
+        total_cls_loss = 0.
 
         for scale_idx, pred in enumerate(predictions):
             stride = self.detection_head.strides[scale_idx]
-            anchors = getattr(self.detection_head, f'anchors_{scale_idx}')
+            # Anchors are already in grid units (divided by stride in yolo_head.py)
+            anchors_grid = getattr(self.detection_head, f'anchors_{scale_idx}').to(device)  # shape (A,2) in grid units
 
-            _, num_anchors, grid_h, grid_w, _ = pred.shape
+            B, A, GH, GW, _ = pred.shape
 
-            target_boxes = torch.zeros((batch_size, num_anchors, grid_h, grid_w, 4), device=device)
-            target_obj = torch.zeros((batch_size, num_anchors, grid_h, grid_w), device=device)
-            target_cls = torch.zeros((batch_size, num_anchors, grid_h, grid_w, self.detection_head.num_classes), device=device)
+            obj_target = torch.zeros((B, A, GH, GW), device=device)
+            cls_target = torch.zeros((B, A, GH, GW, num_classes), device=device)
+            box_target = torch.zeros((B, A, GH, GW, 4), device=device)
 
-            for b in range(batch_size):
+            for b in range(bs):
                 if len(targets[b]['boxes']) == 0:
                     continue
 
-                gt_boxes_norm = targets[b]['boxes']  # [N, 4] normalized [cx, cy, w, h] in [0,1]
-                gt_labels = targets[b]['labels']
+                boxes = targets[b]['boxes'].to(device)  # expected cx,cy,w,h normalized
+                labels = targets[b]['labels'].to(device)
 
-                for gt_idx in range(len(gt_boxes_norm)):
-                    # Convert normalized to absolute
-                    cx_norm, cy_norm, w_norm, h_norm = gt_boxes_norm[gt_idx]
-                    cx = cx_norm * image_size[1]  # width
-                    cy = cy_norm * image_size[0]  # height
-                    w = w_norm * image_size[1]
-                    h = h_norm * image_size[0]
-                    gt_label = gt_labels[gt_idx]
+                for i, (cxn, cyn, wn, hn) in enumerate(boxes):
+                    # NOTE: image_size is (H, W)
+                    H, W = image_size
+                    cx = cxn * W
+                    cy = cyn * H
+                    w  = wn  * W
+                    h  = hn  * H
 
-                    assert 0 <= gt_label < self.detection_head.num_classes
+                    cxg, cyg = cx / stride, cy / stride
+                    wg, hg = w / stride, h / stride
 
-                    grid_x = max(0, min(int(cx / stride), grid_w - 1))
-                    grid_y = max(0, min(int(cy / stride), grid_h - 1))
+                    gi, gj = int(cxg), int(cyg)
+                    if gi < 0 or gi >= GW or gj < 0 or gj >= GH:
+                        continue
 
-                    cx_grid = cx / stride
-                    cy_grid = cy / stride
-                    w_grid = w / stride
-                    h_grid = h / stride
+                    gt_wh = torch.tensor([wg, hg], device=device)
 
-                    gt_wh = torch.tensor([w_grid, h_grid], device=device)
-                    anchor_ious = torch.min(gt_wh / (anchors + 1e-9), anchors / (gt_wh + 1e-9)).min(dim=1)[0]
-                    best_anchor_idx = anchor_ious.argmax()
+                    # --- True IoU anchor matching (anchors_grid vs gt_wh) ---
+                    # anchors_grid is (A,2) where [:,0] is width, [:,1] is height (grid units)
+                    inter_w = torch.min(anchors_grid[:,0], gt_wh[0])
+                    inter_h = torch.min(anchors_grid[:,1], gt_wh[1])
+                    inter = inter_w * inter_h
+                    union = anchors_grid[:,0]*anchors_grid[:,1] + gt_wh[0]*gt_wh[1] - inter
+                    ious = inter / (union + 1e-9)
+                    best_a = int(ious.argmax().item())
 
-                    target_obj[b, best_anchor_idx, grid_y, grid_x] = 1.0
-                    target_boxes[b, best_anchor_idx, grid_y, grid_x, 0] = cx_grid - grid_x
-                    target_boxes[b, best_anchor_idx, grid_y, grid_x, 1] = cy_grid - grid_y
-                    target_boxes[b, best_anchor_idx, grid_y, grid_x, 2] = torch.log(w_grid / (anchors[best_anchor_idx, 0] + 1e-9) + 1e-9)
-                    target_boxes[b, best_anchor_idx, grid_y, grid_x, 3] = torch.log(h_grid / (anchors[best_anchor_idx, 1] + 1e-9) + 1e-9)
-                    target_cls[b, best_anchor_idx, grid_y, grid_x, gt_label] = 1.0
+                    obj_target[b, best_a, gj, gi] = 1.0
+                    cls_target[b, best_a, gj, gi, int(labels[i])] = 1.0
 
-            pred_xy = pred[..., 0:2]
-            pred_wh = pred[..., 2:4]
-            pred_obj = pred[..., 4]
+                    box_target[b, best_a, gj, gi, 0] = cxg - gi
+                    box_target[b, best_a, gj, gi, 1] = cyg - gj
+                    box_target[b, best_a, gj, gi, 2] = torch.log(wg / (anchors_grid[best_a,0] + 1e-9) + 1e-9)
+                    box_target[b, best_a, gj, gi, 3] = torch.log(hg / (anchors_grid[best_a,1] + 1e-9) + 1e-9)
+
+            pred_xy = torch.sigmoid(pred[..., 0:2])   # tx,ty prob
+            pred_wh = pred[..., 2:4]                  # tw,th (raw)
+            pred_obj = pred[..., 4]                   # logits assumed
             pred_cls = pred[..., 5:]
 
-            obj_loss = nn.functional.binary_cross_entropy_with_logits(pred_obj, target_obj, reduction='mean')
+            # objectness loss (logits)
+            obj_loss = nn.functional.binary_cross_entropy_with_logits(pred_obj, obj_target)
 
-            pos_mask = target_obj > 0.5
+            pos_mask = obj_target == 1
+
             if pos_mask.sum() > 0:
-                box_loss = nn.functional.mse_loss(pred_xy[pos_mask], target_boxes[..., 0:2][pos_mask], reduction='mean') + \
-                           nn.functional.mse_loss(pred_wh[pos_mask], target_boxes[..., 2:4][pos_mask], reduction='mean')
-                cls_loss = nn.functional.binary_cross_entropy_with_logits(pred_cls[pos_mask], target_cls[pos_mask], reduction='mean')
+                tx = box_target[..., 0:2]
+                tw = box_target[..., 2:4]
+
+                # box xy: compare probabilities (sigmoid outputs) with targets in [0,1]
+                box_loss_xy = nn.functional.binary_cross_entropy(pred_xy[pos_mask], tx[pos_mask])
+                # wh: compare raw preds to target log-scale with MSE
+                box_loss_wh = nn.functional.mse_loss(pred_wh[pos_mask], tw[pos_mask])
+
+                box_loss = box_loss_xy + box_loss_wh
+
+                cls_loss = nn.functional.binary_cross_entropy_with_logits(
+                    pred_cls[pos_mask],
+                    cls_target[pos_mask]
+                )
             else:
-                box_loss = torch.tensor(0.0, device=device)
-                cls_loss = torch.tensor(0.0, device=device)
+                box_loss = torch.tensor(0., device=device)
+                cls_loss = torch.tensor(0., device=device)
 
             total_box_loss += box_loss
             total_obj_loss += obj_loss
             total_cls_loss += cls_loss
 
-        num_scales = len(predictions)
-        total_box_loss /= num_scales
-        total_obj_loss /= num_scales
-        total_cls_loss /= num_scales
+        total_box_loss /= len(predictions)
+        total_obj_loss /= len(predictions)
+        total_cls_loss /= len(predictions)
 
-        total_loss = self.box_loss_weight * total_box_loss + \
-                     self.obj_loss_weight * total_obj_loss + \
-                     self.cls_loss_weight * total_cls_loss
+        total_loss = (
+            self.box_loss_weight * total_box_loss +
+            self.obj_loss_weight * total_obj_loss +
+            self.cls_loss_weight * total_cls_loss
+        )
 
-        return {'loss': total_loss, 'box_loss': total_box_loss, 'obj_loss': total_obj_loss, 'cls_loss': total_cls_loss}
+        return {
+            'loss': total_loss,
+            'box_loss': total_box_loss,
+            'obj_loss': total_obj_loss,
+            'cls_loss': total_cls_loss
+        }
 
     def training_step(self, batch, batch_idx):
         images, targets = batch['images'], batch['targets']
@@ -232,24 +248,39 @@ class YOLODetector(L.LightningModule):
                 conf_threshold=self.conf_threshold,
                 nms_threshold=self.nms_threshold
             )
-        if TORCHMETRICS_AVAILABLE and self.map_metric is not None:
-            self.map_metric.update(decoded_predictions, targets)
+
+        fixed_targets = []
+
+        h, w = images_tensor.shape[-2:]
+
+        for t in targets:
+            gt_boxes = t['boxes']  # xywhn
+
+            # xywhn -> xyxy absolute
+            gt_boxes = box_convert(gt_boxes, in_fmt="cxcywh", out_fmt="xyxy").clone()
+            gt_boxes[:, [0, 2]] *= w
+            gt_boxes[:, [1, 3]] *= h
+
+            fixed_targets.append({
+                "boxes": gt_boxes,
+                "labels": t["labels"]
+            })
+
+        self.map_metric.update(decoded_predictions, fixed_targets)
+
         self.val_predictions.extend(decoded_predictions)
-        self.val_targets.extend(targets)
+        self.val_targets.extend(fixed_targets)
         self.val_images.extend([img.cpu() for img in images_tensor])
 
     def on_validation_epoch_end(self):
         if len(self.val_predictions) == 0:
             return
 
-        if TORCHMETRICS_AVAILABLE and self.map_metric is not None:
-            metric_dict = self.map_metric.compute()
-            map_50 = float(metric_dict.get('map_50', 0.0))
-            map_75 = float(metric_dict.get('map_75', 0.0))
-            map_50_95 = float(metric_dict.get('map', 0.0))
-            self.map_metric.reset()
-        else:
-            map_50 = map_75 = map_50_95 = 0.0
+        metric_dict = self.map_metric.compute()
+        map_50 = float(metric_dict.get('map_50', 0.0))
+        map_75 = float(metric_dict.get('map_75', 0.0))
+        map_50_95 = float(metric_dict.get('map', 0.0))
+        self.map_metric.reset()
 
         f1, precision, recall = self._compute_f1(self.val_predictions, self.val_targets)
 

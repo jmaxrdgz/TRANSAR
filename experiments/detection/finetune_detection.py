@@ -19,7 +19,7 @@ from lightning.pytorch.loggers import TensorBoardLogger
 
 from utils.config import load_config
 from experiments.detection.models import YOLODetector
-from experiments.detection.data import create_detection_dataloaders
+from data.data_finetune import build_dataloaders
 from experiments.detection.callbacks import ValidationVisualizationCallback
 
 
@@ -224,7 +224,7 @@ def main():
 
     # Create dataloaders
     print("Creating dataloaders...")
-    train_dataloader, val_dataloader = create_detection_dataloaders(config)
+    train_dataloader, val_dataloader = build_dataloaders(config)
     print(f"Train samples: {len(train_dataloader.dataset)}")
     print(f"Val samples: {len(val_dataloader.dataset)}")
 
