@@ -1,5 +1,6 @@
 import sys
 import platform
+import argparse
 import torch.multiprocessing as mp
 from pathlib import Path
 
@@ -16,8 +17,18 @@ from rcnn import FasterRCNNLit
 from data.data_finetune import build_dataloaders
 
 if __name__ == "__main__":
+    # Argument parsing
+    parser = argparse.ArgumentParser(description='Train Faster R-CNN with SwinV2 backbone')
+    parser.add_argument('--limit_train_batches', type=float, default=1.0,
+                        help='Percentage of training batches to use (0.0-1.0 for percentage, >1.0 for absolute number of batches)')
+    parser.add_argument('--limit_val_batches', type=float, default=1.0,
+                        help='Percentage of validation batches to use (0.0-1.0 for percentage, >1.0 for absolute number of batches)')
+    args = parser.parse_args()
+
+    # macOS multiprocessing fix
     if platform.system() == "Darwin":
             mp.set_start_method("spawn", force=True)
+
 
     config = load_config('experiments/rcnn_detection/config_experiment.yaml')
 
@@ -63,6 +74,8 @@ if __name__ == "__main__":
         callbacks=callbacks,
         deterministic=True,
         enable_progress_bar=True,
+        limit_train_batches=args.limit_train_batches,
+        limit_val_batches=args.limit_val_batches,
     )
 
     trainer.fit(model, train_dataloaders=train_dataloader, val_dataloaders=val_dataloader)
