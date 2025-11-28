@@ -31,8 +31,8 @@ if __name__ == "__main__":
     if platform.system() == "Darwin":
             mp.set_start_method("spawn", force=True)
 
-
-    config = load_config('experiments/rcnn_detection/config_experiment.yaml')
+    # Load config (pass empty list to prevent load_config from parsing sys.argv)
+    config = load_config('experiments/rcnn_detection/config_experiment.yaml', args=[])
 
     L.seed_everything(config.SEED, workers=True)
 

@@ -27,7 +27,7 @@ conda_env/
 # -----------------------------
 # Lightning / Checkpoints / Logs
 # -----------------------------
-lightning_logs/
+logs/
 checkpoints/
 *.ckpt
 *.pth
