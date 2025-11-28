@@ -1,3 +1,4 @@
+import os
 import sys
 import platform
 import argparse
@@ -5,7 +6,8 @@ import torch.multiprocessing as mp
 from pathlib import Path
 
 import lightning as L
-from lightning.pytorch.callbacks import ModelCheckpoint, ModelSummary
+from lightning.pytorch.callbacks import ModelCheckpoint, ModelSummary, LearningRateMonitor
+from lightning.pytorch.loggers import TensorBoardLogger
 
 # Add project root to path
 project_root = Path(__file__).parent.parent.parent
@@ -50,19 +52,34 @@ if __name__ == "__main__":
         image_size=config.MODEL.IN_SIZE
     )
 
-    checkpoint_callback = ModelCheckpoint(
-        dirpath=f"checkpoints/pretrain/{config.MODEL.BACKBONE}",
-        filename="rcnn-detection-{epoch:03d}-{train_loss:.4f}",
-        save_top_k=3,
-        monitor="train_loss",
-        mode="min",
-        save_last=True,
-        every_n_epochs=config.TRAIN.LOG_FREQ
+    # Setup logging
+    log_dir = config.LOGGING.LOG_DIR
+    os.makedirs(log_dir, exist_ok=True)
+
+    logger = TensorBoardLogger(
+        save_dir=log_dir,
+        name=config.EXPERIMENT.NAME,
+        version=config.EXPERIMENT.VERSION
     )
+    print(f"TensorBoard logs: {logger.log_dir}")
+
+    # Setup callbacks
+    checkpoint_callback = ModelCheckpoint(
+        dirpath=os.path.join(logger.log_dir, 'checkpoints'),
+        filename='epoch={epoch:02d}-train_loss={train_loss:.4f}',
+        monitor='train_loss',
+        mode='min',
+        save_top_k=config.LOGGING.SAVE_TOP_K,
+        save_last=True,
+        auto_insert_metric_name=False
+    )
+
+    lr_monitor = LearningRateMonitor(logging_interval='epoch')
 
     callbacks = [
         ModelSummary(max_depth=2),
-        checkpoint_callback
+        checkpoint_callback,
+        lr_monitor
     ]
 
     trainer = L.Trainer(
@@ -70,6 +87,7 @@ if __name__ == "__main__":
         max_epochs=config.TRAIN.EPOCHS,
         accelerator="gpu",
         devices=config.TRAIN.GPUS,
+        logger=logger,
         log_every_n_steps=config.TRAIN.LOG_FREQ,
         callbacks=callbacks,
         deterministic=True,
