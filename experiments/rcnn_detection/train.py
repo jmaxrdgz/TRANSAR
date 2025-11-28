@@ -26,9 +26,10 @@ if __name__ == "__main__":
     train_dataloader, val_dataloader = build_dataloaders(config)
 
     backbone = get_backbone(
-        config.MODEL.BACKBONE.NAME, 
+        config.MODEL.BACKBONE.NAME,
         config.MODEL.BACKBONE.PRETRAINED,
-        config.MODEL.BACKBONE.WEIGHTS
+        config.MODEL.BACKBONE.WEIGHTS,
+        config.MODEL.NUM_BLOCKS_TO_UNFREEZE
         )
 
     model = FasterRCNNLit(
