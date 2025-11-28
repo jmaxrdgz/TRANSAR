@@ -1,0 +1,59 @@
+# config_experiment.yaml
+# Configuration for YOLO detection experiments with timm backbones (SwinV2/ResNet/ConvNeXt)
+
+SEED: 42
+
+MODEL:
+  NAME: SwinV2_tiny_RCNN_256
+  IN_SIZE: 256
+  IN_CHANS: 1  # SAR images are single-channel
+
+  BACKBONE:
+    NAME: swinv2_tiny_window8_256  # Options: swinv2_tiny_window8_256, resnet50, convnext_tiny, etc.
+    PRETRAINED: true               # Use ImageNet pretrained weights
+    WEIGHTS: null                  # Path to custom pretrained weights (overrides PRETRAINED if set)
+    OUT_INDICES: [1,2,3]           # Multi-scale feature outputs (0 = shallow, 3 = deepest)
+
+  # Progressive unfreezing
+  NUM_BLOCKS_TO_UNFREEZE: 1  # 0 = freeze entire backbone, 1-4 = unfreeze last N blocks
+
+DATA:
+  DATA_PATH: dataset/supervised/SIVED/ImageSets
+  NUM_CLASSES: 1 
+
+  # SAR-specific normalization
+  SAR_NORM_SCALE: null
+  GLOBAL_STD: null
+
+  # Data augmentation
+  AUGMENTATION:
+    ENABLED: true
+    COLOR_JITTER: null
+    RANDOM_GAMMA: true
+
+TRAIN:
+  GPUS: 1
+  NUM_WORKERS: 4
+  EPOCHS: 50
+  BATCH_SIZE: 8
+  HEAD_LR: 0.0001
+  LR: 0.0001            # Fallback for backward compatibility
+  WEIGHT_DECAY: 0.0005
+  LOG_FREQ: 10
+
+  # Learning rate schedulers
+  SCHEDULER:
+    ENABLED: true
+    MIN_LR: 0.00001
+
+LOGGING:
+  LOG_DIR: logs/detection_experiments
+  TENSORBOARD: true
+  SAVE_TOP_K: 3
+
+NUM_VIZ_IMAGES: 5
+
+EXPERIMENT:
+  NAME: rcnn_detection
+  VERSION: null
+  TAGS: []

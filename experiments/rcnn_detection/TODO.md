@@ -1,0 +1,5 @@
+- [ ] Allow to load custom weights in SwinV2 (and custom weights pretrained on different size input)
+- [ ] Add freature to freeze blocks of the backbone 
+- [ ] Train backbone and head with different learning rates 
+- [ ] Log metrics and samples in tensorboard
+- [ ] Make HiViT-Base backbone compatible with Timm (import from github)
